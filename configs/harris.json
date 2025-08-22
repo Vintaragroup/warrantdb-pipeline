@@ -1,0 +1,16 @@
+{
+  "county": "Harris",
+  "discovery": {
+    "directory": "https://www.countyoffice.org/tx-harris-county-public-records/"
+  },
+  "sources": {
+    "inmates": "https://apps.harriscountyso.org/JailInfo/",
+    "warrants": "https://apps.harriscountyso.org/warrants/",
+    "cases_public": "https://www.myharriscountycases.com/"
+  },
+  "cadence": {
+    "inmates_minutes": 60,
+    "warrants_minutes": 720,
+    "cases_minutes": 1440
+  }
+}

@@ -1,0 +1,674 @@
+<!DOCTYPE HTML>
+
+<style type="text/css">
+    .GreenModalHeader {
+        background-color: green;
+    }
+
+    .WhiteModalTitle {
+        color: white;
+    }
+</style>
+
+<html lang="en">
+<head>
+
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Jail Public Information Inquiry</title>
+    <link rel="stylesheet" href="/lib/bootstrap/dist/css/bootstrap.min.css" />
+    <link rel="stylesheet" href="/css/site.css?v=AKvNjO3dCPPS0eSU1Ez8T2wI280i08yGycV9ndytL-c" />
+
+    <!-- This script is needed to utilize the sweetalert2 modal from https://sweetalert2.github.io/#download -->
+    <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+
+</head>
+<body>
+    <header b-la2l883k6i>
+        <nav b-la2l883k6i class="navbar navbar-expand-sm navbar-light bg-light">
+            <div b-la2l883k6i class="container-fluid " style="background-color:#235ea0; color:white;">
+                <label b-la2l883k6i class="control-label" style="font-size: x-large; font-weight: 500;">Jail Public Information Inquiry</label>
+            </div>
+        </nav>
+
+    </header>
+    <div b-la2l883k6i class="container-fluid">
+        <main b-la2l883k6i role="main">
+            
+<br />
+
+
+<form method="get" action="/">
+
+    <div class="container-fluid">
+        <div class="row">
+            <div class="col-lg-12 col-md-12 col-sm-12 col-xs-12">
+
+                <h6>To perform a search, enter one or both of the following information and click on the <span style="font-weight:bold;color:blue">Search</span> button.  Click on the inmate <span style="font-weight:bold; color:black;">name</span> to view their detail information.</h6>
+                <ul>
+                    <li>The inmate's last name (full or partial).</li>
+                    <li>The inmate's first name (full or partial).</li>
+                </ul>
+
+            </div>
+
+            <div class="row d-flex align-items-end">
+
+                <div class="col-lg-6 col-md-6 col-sm-12 col-xs-12">
+                    <label for="ApplicationGUID">Last Name:</label>
+                    <div class="input-group">
+                        <input type="text" class="form-control" id="LastName" name="LastName" value="M">
+                    </div>
+                </div>
+
+                <div class="col-lg-6 col-md-6 col-sm-12 col-xs-12">
+                    <label for="ApplicationLastName">First Name:</label>
+                    <div class="input-group">
+                        <input type="text" class="form-control input-validation-error" id="FirstName" name="FirstName" value="">
+                    </div>
+                </div>
+            </div>
+           
+            
+        </div>
+        <br />
+        <div class="row d-flex">
+            <div class="col-lg-6 col-md-6 col-sm-12 col-xs-12">
+                <input type="submit" name="SearchButton" id="SearchButton" value="Search" class="btn btn-primary" />
+                &nbsp;
+                <input type="submit" name="ClearButton" id="ClearButton" value="Clear" class="btn btn-success" />
+            </div>
+        </div>
+    </div>
+</form>
+
+<br />
+
+    <div class="container-fluid" style="height: 300px; overflow-y: scroll; text-align:center">
+
+        <table id="InmatesTable" name="InmatesTable" class="table table-striped table-hover table-responsive-lg table table-bordered caption-top" style="font-family:Calibri; font-size:small">
+
+            <thead style="position: sticky;top: 0" class="table-dark">
+                <tr>
+                    <th style="display:none">Booking Number</th>
+                    <th>Name</th>
+                    <th>Jail ID</th>
+                    <th>Race</th>
+                    <th>Sex</th>
+                </tr>
+            </thead>
+
+            <tbody>
+
+                    <tr>
+                        <td style="display:none">2400165</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00229476">MAJOR,ANTONETTE</a></td>
+                        <td>P00229476</td>
+                        <td>BLACK</td>
+                        <td>FEMALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2502992</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00260697">MALDONADO-SIERRA,ADRIAN</a></td>
+                        <td>P00260697</td>
+                        <td>WHITE</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2503853</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00261103">MALPAYA,MARYJANE RITUALO</a></td>
+                        <td>P00261103</td>
+                        <td>ASIAN</td>
+                        <td>FEMALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2503369</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00257776">MALVEAUX,MITCHELLA ANTOINETTE</a></td>
+                        <td>P00257776</td>
+                        <td>BLACK</td>
+                        <td>FEMALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2502812</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P92003045">MANNING,RONNIE BROADEN</a></td>
+                        <td>P92003045</td>
+                        <td>BLACK</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2406228</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00256942">MANUEL,ERIC</a></td>
+                        <td>P00256942</td>
+                        <td>BLACK</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2506190</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00262160">MARES,ISAIAH</a></td>
+                        <td>P00262160</td>
+                        <td>WHITE</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2505771</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00105040">MARIN,LISA MARIE</a></td>
+                        <td>P00105040</td>
+                        <td>WHITE</td>
+                        <td>FEMALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2504928</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00253099">MARIN,MAURICIO MANUEL</a></td>
+                        <td>P00253099</td>
+                        <td>WHITE</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2505531</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00250522">MARINE,FRANKLIN</a></td>
+                        <td>P00250522</td>
+                        <td>BLACK</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2505890</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00171731">MARISCAL,LORENZO</a></td>
+                        <td>P00171731</td>
+                        <td>WHITE</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2506143</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00153021">MARKLE,RICHARD MARC</a></td>
+                        <td>P00153021</td>
+                        <td>WHITE</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2504488</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00103690">MARMOLEJO-AGUILAR,ARTURO</a></td>
+                        <td>P00103690</td>
+                        <td>WHITE</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2503851</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00239747">MARSHALL,CHRISTOPHER LEON</a></td>
+                        <td>P00239747</td>
+                        <td>BLACK</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2410450</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00187699">MARTIN,MICHAEL LEWIS</a></td>
+                        <td>P00187699</td>
+                        <td>BLACK</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2506288</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00257581">MARTIN,PARRISH OMAR</a></td>
+                        <td>P00257581</td>
+                        <td>BLACK</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2506176</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00110849">MARTINEZ,ADOLFO</a></td>
+                        <td>P00110849</td>
+                        <td>WHITE</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2506516</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00243906">MARTINEZ,ARTURO</a></td>
+                        <td>P00243906</td>
+                        <td>WHITE</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2503042</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00079515">MARTINEZ,JAVIER</a></td>
+                        <td>P00079515</td>
+                        <td>WHITE</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2503410</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00259487">MARTINEZ,JUAN CARLOS</a></td>
+                        <td>P00259487</td>
+                        <td>WHITE</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2501599</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00233379">MARTINEZ-IBARRA,CHRISTOPHER RENE</a></td>
+                        <td>P00233379</td>
+                        <td>WHITE</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2506543</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00262332">MASON,LANA JEANINE</a></td>
+                        <td>P00262332</td>
+                        <td>WHITE</td>
+                        <td>FEMALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2503714</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00255423">MATTHEWS,ETHAN</a></td>
+                        <td>P00255423</td>
+                        <td>ASIAN</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2506551</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00262337">MAXFIELD,TERRANCE ALLEN</a></td>
+                        <td>P00262337</td>
+                        <td>BLACK</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2506076</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00262114">MAYES,TANEISHA YVETTE</a></td>
+                        <td>P00262114</td>
+                        <td>BLACK</td>
+                        <td>FEMALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2409726</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00126859">MCDONALD,KEVIN ELLIS</a></td>
+                        <td>P00126859</td>
+                        <td>BLACK</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2506456</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00262290">MCGINN,JOSEPH</a></td>
+                        <td>P00262290</td>
+                        <td>WHITE</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2504981</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00104545">MCMILLION,ALEXANDER ELINCOLN</a></td>
+                        <td>P00104545</td>
+                        <td>BLACK</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2505953</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00096581">MCQURREN,RONALD JEROME</a></td>
+                        <td>P00096581</td>
+                        <td>BLACK</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2504696</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00142888">MEDINA,ANA VICTORIA</a></td>
+                        <td>P00142888</td>
+                        <td>WHITE</td>
+                        <td>FEMALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2503269</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00187986">MEDINA,CHRISTOPHER WAYNE</a></td>
+                        <td>P00187986</td>
+                        <td>WHITE</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2506483</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00108030">MEDRANO,CARLOS ALEJANDRO</a></td>
+                        <td>P00108030</td>
+                        <td>WHITE</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2506557</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00247258">MEDRANO,ERICK MEJIA</a></td>
+                        <td>P00247258</td>
+                        <td>WHITE</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2506426</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00262273">MEJIA,KEVIN</a></td>
+                        <td>P00262273</td>
+                        <td>WHITE</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2506528</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00262322">MELENDEZ,LUVIN EDWARD</a></td>
+                        <td>P00262322</td>
+                        <td>WHITE</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2506467</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00106116">MELTON,DARRICK WAYNE</a></td>
+                        <td>P00106116</td>
+                        <td>BLACK</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2503527</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00255542">MENDEZ ALVARADO,ROGER ISAIAS</a></td>
+                        <td>P00255542</td>
+                        <td>WHITE</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2410344</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00256711">MENDOZA,ANASTASIUS</a></td>
+                        <td>P00256711</td>
+                        <td>WHITE</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2504678</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00261472">MENDOZA COC,EDGAR RENE</a></td>
+                        <td>P00261472</td>
+                        <td>WHITE</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2305726</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00239811">MENIFEE,CHRISTIAN</a></td>
+                        <td>P00239811</td>
+                        <td>BLACK</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2506325</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00241091">MERINO,ALI</a></td>
+                        <td>P00241091</td>
+                        <td>WHITE</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2505896</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00260227">MFOGHOM,CATELLA VANESSA</a></td>
+                        <td>P00260227</td>
+                        <td>BLACK</td>
+                        <td>FEMALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2500982</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00244354">MIKLE,EARNEST DWAYNE</a></td>
+                        <td>P00244354</td>
+                        <td>BLACK</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2505600</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00254159">MILLER,JORDAN BRADLEY</a></td>
+                        <td>P00254159</td>
+                        <td>WHITE</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2505165</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P90000806">MILLER,KOBI LAMONT</a></td>
+                        <td>P90000806</td>
+                        <td>BLACK</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2504128</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00246909">MILLER,SABION MARQUISE DAKOTA</a></td>
+                        <td>P00246909</td>
+                        <td>BLACK</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2409587</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00167961">MITCHELL,THEODORE</a></td>
+                        <td>P00167961</td>
+                        <td>WHITE</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2506202</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00262168">MONFIL-CALIHUA,RAFAEL</a></td>
+                        <td>P00262168</td>
+                        <td>WHITE</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2307432</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00238885">MONONO,HEARLD ESOMBE</a></td>
+                        <td>P00238885</td>
+                        <td>BLACK</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2503365</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00260874">MONTAVO,JUAN CARLOS</a></td>
+                        <td>P00260874</td>
+                        <td>WHITE</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2505063</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00261660">MONTEZ,URIEL</a></td>
+                        <td>P00261660</td>
+                        <td>WHITE</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2505758</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00261966">MOORE,AMBER DIANE</a></td>
+                        <td>P00261966</td>
+                        <td>WHITE</td>
+                        <td>FEMALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2506488</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00255014">MOORE,JAMES RAY JR</a></td>
+                        <td>P00255014</td>
+                        <td>BLACK</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2505066</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00183533">MOORE,QUINCY STEVEN</a></td>
+                        <td>P00183533</td>
+                        <td>BLACK</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2506461</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00262294">MOORE,RIA</a></td>
+                        <td>P00262294</td>
+                        <td>WHITE</td>
+                        <td>FEMALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2506552</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00141658">MOORE,SEPTEMBER TANELL</a></td>
+                        <td>P00141658</td>
+                        <td>BLACK</td>
+                        <td>FEMALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2408806</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00258230">MORALES,MICHAEL ANGELO</a></td>
+                        <td>P00258230</td>
+                        <td>WHITE</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2407564</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00208677">MORALES BARRERA,DAVID</a></td>
+                        <td>P00208677</td>
+                        <td>WHITE</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2502922</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00256101">MORENO,ERIK</a></td>
+                        <td>P00256101</td>
+                        <td>WHITE</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2504594</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00147146">MORENO,JOE MANUEL</a></td>
+                        <td>P00147146</td>
+                        <td>WHITE</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2506327</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00262241">MORRIS,JULION DESHAUD</a></td>
+                        <td>P00262241</td>
+                        <td>BLACK</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2304529</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00250390">MORTON,ALEXANDRA ANNA</a></td>
+                        <td>P00250390</td>
+                        <td>WHITE</td>
+                        <td>FEMALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2505154</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00261695">MOSBY,DOROTHY LEANN</a></td>
+                        <td>P00261695</td>
+                        <td>BLACK</td>
+                        <td>FEMALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2500293</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00259367">MOSQUERO,CESAR ALEJANDRO</a></td>
+                        <td>P00259367</td>
+                        <td>WHITE</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2400432</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00246449">MUKOLU,AZUKA BRYAN JR</a></td>
+                        <td>P00246449</td>
+                        <td>BLACK</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2500578</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P93002170">MUNKS,KELVIN JEROME</a></td>
+                        <td>P93002170</td>
+                        <td>BLACK</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2504988</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00261626">MURILLO,KIMBERLY</a></td>
+                        <td>P00261626</td>
+                        <td>WHITE</td>
+                        <td>FEMALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2504730</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00246823">MURILLO,ROXANA JEANETTE</a></td>
+                        <td>P00246823</td>
+                        <td>WHITE</td>
+                        <td>FEMALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">1815426</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00218482">MURPHY,DANIEL PAUL</a></td>
+                        <td>P00218482</td>
+                        <td>BLACK</td>
+                        <td>MALE</td>
+                    </tr>
+
+        </table>
+    </div>
+
+
+
+
+
+
+
+        </main>
+    </div>
+
+    <!-- These sites are required -->
+    <script src="/lib/jquery/dist/jquery.min.js"></script>
+    <script src="/lib/bootstrap/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="/js/site.js?v=4q1jwFhaPaZgr8WAUSrux6hAuh0XDg9kPS3xIVq36I0"></script>
+
+    <!-- This site is required for SSO -->
+    
+
+    <script>
+
+        $(document).ready(function () {
+
+            // Save the tempdata messages to variables
+            var ErrorMessage = ''
+            var SuccessMessage = ''
+            var WarningMessage = ''
+
+            // Display the sweet alert2 error message if the message exists
+            if (ErrorMessage.length > 0)
+                DisplayErrorMessage(ErrorMessage);
+
+            // Display the sweet alert2 success message if the message exists
+            if (SuccessMessage.length > 0)
+                DisplaySuccessMessage(SuccessMessage);
+
+            // Display the sweet alert2 warning message if the message exists
+            if (WarningMessage.length > 0)
+                DisplayWarningMessage(WarningMessage);
+
+        });
+
+        // Display the sweet alert2 error message
+        function DisplayErrorMessage(ErrorMessage) {
+            Swal.fire('Error', ErrorMessage, 'error')
+        }
+
+        // Display the sweet alert2 sucess message
+        function DisplaySuccessMessage(SuccessMessage) {
+            Swal.fire('Operation Successful', SuccessMessage, 'success')
+        }
+
+        // Display the sweet alert2 warningg message
+        function DisplayWarningMessage(WarningMessage) {
+            Swal.fire('Search Not Successful', WarningMessage, 'warning')
+        }
+
+        function sortTable(columnIndex) {
+            var table = document.getElementById('InmatesTable');
+            var rows = Array.from(table.rows);
+            var headerRow = rows.shift();
+            var sortOrder = headerRow.cells[columnIndex].getAttribute('data-sort-order') === 'asc' ? 'desc' : 'asc';
+
+            rows.sort(function (a, b) {
+                var cellA = a.cells[columnIndex].innerText;
+                var cellB = b.cells[columnIndex].innerText;
+
+                return sortOrder === 'asc' ? cellA.localeCompare(cellB) : cellB.localeCompare(cellA);
+            });
+
+            headerRow.cells[columnIndex].setAttribute('data-sort-order', sortOrder);
+            table.tBodies[0].append(...rows);
+        }
+
+        document.addEventListener('DOMContentLoaded', function () {
+            var headers = document.querySelectorAll('#InmatesTable thead th');
+            headers.forEach(function (header, index) {
+                header.addEventListener('click', function () {
+                    sortTable(index);
+                });
+            });
+        });
+
+    </script>
+    
+</body>
+</html>

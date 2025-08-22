@@ -1,0 +1,11 @@
+{
+  "county": "Brazoria",
+  "sources": {
+    "jailing_search": "https://pubweb.brazoriacountytx.gov/PublicAccess/JailingSearch.aspx?ID=400",
+    "cases_public": "https://pubweb.brazoriacountytx.gov/PublicAccess/Search.aspx?ID=100"
+  },
+  "cadence": {
+    "inmates_minutes": 60,
+    "cases_minutes": 1440
+  }
+}

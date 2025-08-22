@@ -1,0 +1,20 @@
+{
+  "url": "https://p2c.galvestoncountytx.gov/jqHandler.ashx?op=s",
+  "method": "POST",
+  "headers": {
+    "referer": "https://p2c.galvestoncountytx.gov/jailinmates.aspx",
+    "x-requested-with": "XMLHttpRequest",
+    "user-agent": "Mozilla/5.0 (compatible; WarrantDB/0.2)",
+    "accept": "application/json, text/javascript, */*; q=0.01",
+    "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+    "Referer": "https://p2c.galvestoncountytx.gov/jailinmates.aspx",
+    "Origin": "https://p2c.galvestoncountytx.gov",
+    "X-Requested-With": "XMLHttpRequest",
+    "Accept": "application/json, text/javascript, */*; q=0.01"
+  },
+  "post_data": "t=ii&_search=false&nd=1755107380909&rows=10000&page=1&sidx=disp_name&sord=asc",
+  "cookie_names": [
+    "ASP.NET_SessionId",
+    "TS01eef263"
+  ]
+}

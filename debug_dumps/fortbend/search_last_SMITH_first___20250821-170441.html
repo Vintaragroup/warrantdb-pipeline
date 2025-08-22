@@ -1,0 +1,268 @@
+<!DOCTYPE HTML>
+
+<style type="text/css">
+    .GreenModalHeader {
+        background-color: green;
+    }
+
+    .WhiteModalTitle {
+        color: white;
+    }
+</style>
+
+<html lang="en">
+<head>
+
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Jail Public Information Inquiry</title>
+    <link rel="stylesheet" href="/lib/bootstrap/dist/css/bootstrap.min.css" />
+    <link rel="stylesheet" href="/css/site.css?v=AKvNjO3dCPPS0eSU1Ez8T2wI280i08yGycV9ndytL-c" />
+
+    <!-- This script is needed to utilize the sweetalert2 modal from https://sweetalert2.github.io/#download -->
+    <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+
+</head>
+<body>
+    <header b-la2l883k6i>
+        <nav b-la2l883k6i class="navbar navbar-expand-sm navbar-light bg-light">
+            <div b-la2l883k6i class="container-fluid " style="background-color:#235ea0; color:white;">
+                <label b-la2l883k6i class="control-label" style="font-size: x-large; font-weight: 500;">Jail Public Information Inquiry</label>
+            </div>
+        </nav>
+
+    </header>
+    <div b-la2l883k6i class="container-fluid">
+        <main b-la2l883k6i role="main">
+            
+<br />
+
+
+<form method="get" action="/">
+
+    <div class="container-fluid">
+        <div class="row">
+            <div class="col-lg-12 col-md-12 col-sm-12 col-xs-12">
+
+                <h6>To perform a search, enter one or both of the following information and click on the <span style="font-weight:bold;color:blue">Search</span> button.  Click on the inmate <span style="font-weight:bold; color:black;">name</span> to view their detail information.</h6>
+                <ul>
+                    <li>The inmate's last name (full or partial).</li>
+                    <li>The inmate's first name (full or partial).</li>
+                </ul>
+
+            </div>
+
+            <div class="row d-flex align-items-end">
+
+                <div class="col-lg-6 col-md-6 col-sm-12 col-xs-12">
+                    <label for="ApplicationGUID">Last Name:</label>
+                    <div class="input-group">
+                        <input type="text" class="form-control" id="LastName" name="LastName" value="SMITH">
+                    </div>
+                </div>
+
+                <div class="col-lg-6 col-md-6 col-sm-12 col-xs-12">
+                    <label for="ApplicationLastName">First Name:</label>
+                    <div class="input-group">
+                        <input type="text" class="form-control input-validation-error" id="FirstName" name="FirstName" value="">
+                    </div>
+                </div>
+            </div>
+           
+            
+        </div>
+        <br />
+        <div class="row d-flex">
+            <div class="col-lg-6 col-md-6 col-sm-12 col-xs-12">
+                <input type="submit" name="SearchButton" id="SearchButton" value="Search" class="btn btn-primary" />
+                &nbsp;
+                <input type="submit" name="ClearButton" id="ClearButton" value="Clear" class="btn btn-success" />
+            </div>
+        </div>
+    </div>
+</form>
+
+<br />
+
+    <div class="container-fluid" style="height: 300px; overflow-y: scroll; text-align:center">
+
+        <table id="InmatesTable" name="InmatesTable" class="table table-striped table-hover table-responsive-lg table table-bordered caption-top" style="font-family:Calibri; font-size:small">
+
+            <thead style="position: sticky;top: 0" class="table-dark">
+                <tr>
+                    <th style="display:none">Booking Number</th>
+                    <th>Name</th>
+                    <th>Jail ID</th>
+                    <th>Race</th>
+                    <th>Sex</th>
+                </tr>
+            </thead>
+
+            <tbody>
+
+                    <tr>
+                        <td style="display:none">2404263</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00239101">SMITH,ANDREW LYNN</a></td>
+                        <td>P00239101</td>
+                        <td>BLACK</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2504325</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00243143">SMITH,DERRIEN CRAIG</a></td>
+                        <td>P00243143</td>
+                        <td>BLACK</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2505927</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00131977">SMITH,DOMINIQUE RASHAD</a></td>
+                        <td>P00131977</td>
+                        <td>BLACK</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2502162</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00260298">SMITH,JACKQUIENSLYN EQUILA</a></td>
+                        <td>P00260298</td>
+                        <td>BLACK</td>
+                        <td>FEMALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2501163</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00259800">SMITH,KANE JEROME</a></td>
+                        <td>P00259800</td>
+                        <td>BLACK</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2505793</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00114141">SMITH,LARRY TERYL</a></td>
+                        <td>P00114141</td>
+                        <td>BLACK</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2503574</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00246974">SMITH,MICHAEL DEONTAY</a></td>
+                        <td>P00246974</td>
+                        <td>BLACK</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2501099</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00231928">SMITH,MICHAEL POWELL</a></td>
+                        <td>P00231928</td>
+                        <td>BLACK</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2501714</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00256111">SMITH,RICKEY JOIQUINN</a></td>
+                        <td>P00256111</td>
+                        <td>BLACK</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2410655</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00241764">SMITH,STEVEN N</a></td>
+                        <td>P00241764</td>
+                        <td>BLACK</td>
+                        <td>MALE</td>
+                    </tr>
+                    <tr>
+                        <td style="display:none">2505925</td>
+                        <td><a href="/Inmate/View_Inmate?VarJailID=P00262037">SMITH,TOSH MELEKE</a></td>
+                        <td>P00262037</td>
+                        <td>BLACK</td>
+                        <td>MALE</td>
+                    </tr>
+
+        </table>
+    </div>
+
+
+
+
+
+
+
+        </main>
+    </div>
+
+    <!-- These sites are required -->
+    <script src="/lib/jquery/dist/jquery.min.js"></script>
+    <script src="/lib/bootstrap/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="/js/site.js?v=4q1jwFhaPaZgr8WAUSrux6hAuh0XDg9kPS3xIVq36I0"></script>
+
+    <!-- This site is required for SSO -->
+    
+
+    <script>
+
+        $(document).ready(function () {
+
+            // Save the tempdata messages to variables
+            var ErrorMessage = ''
+            var SuccessMessage = ''
+            var WarningMessage = ''
+
+            // Display the sweet alert2 error message if the message exists
+            if (ErrorMessage.length > 0)
+                DisplayErrorMessage(ErrorMessage);
+
+            // Display the sweet alert2 success message if the message exists
+            if (SuccessMessage.length > 0)
+                DisplaySuccessMessage(SuccessMessage);
+
+            // Display the sweet alert2 warning message if the message exists
+            if (WarningMessage.length > 0)
+                DisplayWarningMessage(WarningMessage);
+
+        });
+
+        // Display the sweet alert2 error message
+        function DisplayErrorMessage(ErrorMessage) {
+            Swal.fire('Error', ErrorMessage, 'error')
+        }
+
+        // Display the sweet alert2 sucess message
+        function DisplaySuccessMessage(SuccessMessage) {
+            Swal.fire('Operation Successful', SuccessMessage, 'success')
+        }
+
+        // Display the sweet alert2 warningg message
+        function DisplayWarningMessage(WarningMessage) {
+            Swal.fire('Search Not Successful', WarningMessage, 'warning')
+        }
+
+        function sortTable(columnIndex) {
+            var table = document.getElementById('InmatesTable');
+            var rows = Array.from(table.rows);
+            var headerRow = rows.shift();
+            var sortOrder = headerRow.cells[columnIndex].getAttribute('data-sort-order') === 'asc' ? 'desc' : 'asc';
+
+            rows.sort(function (a, b) {
+                var cellA = a.cells[columnIndex].innerText;
+                var cellB = b.cells[columnIndex].innerText;
+
+                return sortOrder === 'asc' ? cellA.localeCompare(cellB) : cellB.localeCompare(cellA);
+            });
+
+            headerRow.cells[columnIndex].setAttribute('data-sort-order', sortOrder);
+            table.tBodies[0].append(...rows);
+        }
+
+        document.addEventListener('DOMContentLoaded', function () {
+            var headers = document.querySelectorAll('#InmatesTable thead th');
+            headers.forEach(function (header, index) {
+                header.addEventListener('click', function () {
+                    sortTable(index);
+                });
+            });
+        });
+
+    </script>
+    
+</body>
+</html>

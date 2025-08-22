@@ -1,0 +1,149 @@
+<!DOCTYPE HTML>
+
+<style type="text/css">
+    .GreenModalHeader {
+        background-color: green;
+    }
+
+    .WhiteModalTitle {
+        color: white;
+    }
+</style>
+
+<html lang="en">
+<head>
+
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Jail Public Information Inquiry</title>
+    <link rel="stylesheet" href="/lib/bootstrap/dist/css/bootstrap.min.css" />
+    <link rel="stylesheet" href="/css/site.css?v=AKvNjO3dCPPS0eSU1Ez8T2wI280i08yGycV9ndytL-c" />
+
+    <!-- This script is needed to utilize the sweetalert2 modal from https://sweetalert2.github.io/#download -->
+    <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+
+</head>
+<body>
+    <header b-la2l883k6i>
+        <nav b-la2l883k6i class="navbar navbar-expand-sm navbar-light bg-light">
+            <div b-la2l883k6i class="container-fluid " style="background-color:#235ea0; color:white;">
+                <label b-la2l883k6i class="control-label" style="font-size: x-large; font-weight: 500;">Jail Public Information Inquiry</label>
+            </div>
+        </nav>
+
+    </header>
+    <div b-la2l883k6i class="container-fluid">
+        <main b-la2l883k6i role="main">
+            
+<br />
+<div class="col d-flex justify-content-center">
+
+    <div class="card" style="max-width: 650px;">
+        <div class="row no-gutters">
+            <div class="col-sm-5">
+                <img id="Mugshot" class="img-fluid img-thumbnail" src="/image/Ghost.jpg" alt="Image Unavailable" title="Image Unavailable">
+            </div>
+            <div class="col-sm-7">
+                <div class="card-body">
+                    <h6 class="card-title"><b>Name: </b> ZAL,ANTHONY JOSEPH</h6>
+                    <h6 class="card-text"><b>Jail ID: </b>P00262331</h6>
+                    <h6 class="card-text"><b>Age: </b>71</h6>
+                    <h6 class="card-text"><b>Race: </b>WHITE</h6>
+                    <h6 class="card-text"><b>Sex: </b>MALE</h6>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<br />
+
+<div class="container-fluid" style="height: 300px; overflow-y: scroll; text-align:center">
+
+    <table id="BookingsTable" name="BookingsTable" class="table table-striped table-hover table-responsive-lg table table-bordered caption-top" style="font-family:Calibri; font-size:small">
+
+        <thead style="position: sticky;top: 0" class="table-dark">
+            <tr>
+                <th>Agency</th>
+                <th>Authority</th>
+                <th>Warrant Number</th>
+                <th>JUS</th>
+                <th>Charge Description</th>
+                <th>LVL</th>
+                <th>Bail Type</th>
+                <th>Bail Amount</th>
+                <th>Fines</th>
+                <th>Disposition</th>
+            </tr>
+        </thead>
+
+        <tbody>
+
+                <tr>
+                    <td>FT. BEND COUNTY SHERIFF&#x27;S OFFICE</td>
+                    <td>ONVW</td>
+                    <td></td>
+                    <td>CTY</td>
+                    <td>ASSAULT CAUSES BODILY INJ FAM VIOL</td>
+                    <td>MA</td>
+                    <td></td>
+                    <td>$0.00</td>
+                    <td>$0.00</td>
+                    <td></td>
+                </tr>
+
+    </table>
+
+</div>
+
+
+        </main>
+    </div>
+
+    <!-- These sites are required -->
+    <script src="/lib/jquery/dist/jquery.min.js"></script>
+    <script src="/lib/bootstrap/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="/js/site.js?v=4q1jwFhaPaZgr8WAUSrux6hAuh0XDg9kPS3xIVq36I0"></script>
+
+    <!-- This site is required for SSO -->
+    
+
+    <script>
+
+        // This javascript function is executed when the page loads
+        $(document).ready(function () {
+
+            // Set the source of the mugshot from the model
+            // document.getElementById('Mugshot').src = ''; 
+        });
+
+        function sortTable(columnIndex) {
+            var table = document.getElementById('BookingsTable');
+            var rows = Array.from(table.rows);
+            var headerRow = rows.shift();
+            var sortOrder = headerRow.cells[columnIndex].getAttribute('data-sort-order') === 'asc' ? 'desc' : 'asc';
+
+            rows.sort(function (a, b) {
+                var cellA = a.cells[columnIndex].innerText;
+                var cellB = b.cells[columnIndex].innerText;
+
+                return sortOrder === 'asc' ? cellA.localeCompare(cellB) : cellB.localeCompare(cellA);
+            });
+
+            headerRow.cells[columnIndex].setAttribute('data-sort-order', sortOrder);
+            table.tBodies[0].append(...rows);
+        }
+
+        document.addEventListener('DOMContentLoaded', function () {
+            var headers = document.querySelectorAll('#InmatesTable thead th');
+            headers.forEach(function (header, index) {
+                header.addEventListener('click', function () {
+                    sortTable(index);
+                });
+            });
+        });
+
+    </script>
+    
+</body>
+</html>

@@ -1,0 +1,11 @@
+{
+  "county": "Galveston",
+  "sources": {
+    "p2c_home": "https://p2c.galvestoncountytx.gov/",
+    "cases_public": "https://odyssey.galvestoncountytx.gov/"
+  },
+  "cadence": {
+    "inmates_minutes": 60,
+    "wanted_minutes": 1440
+  }
+}

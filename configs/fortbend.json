@@ -1,0 +1,9 @@
+{
+  "county": "Fort Bend",
+  "sources": {
+    "jail_public": "https://jail.fortbendcountytx.gov/public/"
+  },
+  "cadence": {
+    "inmates_minutes": 60
+  }
+}
