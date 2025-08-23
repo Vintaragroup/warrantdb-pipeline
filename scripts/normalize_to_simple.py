@@ -1,14 +1,38 @@
 #!/usr/bin/env python3
-import os, re, sys, datetime as dt
+import os, re, sys, time, datetime as dt
 from typing import Any, Dict, Iterable, List, Optional, Tuple
-from pymongo import MongoClient, UpdateOne, ASCENDING
+from pymongo import MongoClient, UpdateOne, ASCENDING, DESCENDING
 from bson import ObjectId
+
+# --- Load .env so Atlas creds are available -------------------------------
+from pathlib import Path
+try:
+    from dotenv import load_dotenv  # pip install python-dotenv
+    load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+except Exception:
+    pass
 
 # ---------- Config ----------
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 MONGO_DB  = os.getenv("MONGO_DB",  "warrantdb")
 
 COUNTY_ALL = ["harris", "brazoria", "galveston", "fortbend"]
+
+# Tunables
+PROGRESS_EVERY = int(os.getenv("NORMALIZE_PROGRESS_EVERY", "1000"))  # print every N docs
+CHUNK_SIZE     = int(os.getenv("NORMALIZE_CHUNK_SIZE", "5000"))      # stream chunk size
+
+# ---------- Tiny logger ----------
+class Logger:
+    def __init__(self) -> None:
+        self.t0 = time.monotonic()
+    def _hms(self) -> str:
+        s = int(time.monotonic() - self.t0)
+        return f"{s//3600:02d}:{(s%3600)//60:02d}:{s%60:02d}"
+    def info(self, msg: str) -> None:
+        print(f"[{self._hms()}] {msg}", flush=True)
+
+L = Logger()
 
 # ---------- Utilities ----------
 DATE_PATTERNS = [
@@ -34,7 +58,6 @@ def parse_date_maybe(s: Optional[str]) -> Optional[str]:
             return (d.date() if isinstance(d, dt.datetime) else d).isoformat()
         except Exception:
             continue
-    # try digits like 2025-08-22T... without Z
     try:
         return dt.datetime.fromisoformat(s.replace("Z","")).date().isoformat()
     except Exception:
@@ -108,11 +131,31 @@ def build_norm_doc(
         "normalized_at": now_iso,
     }
 
+# ---------- Chunked streaming (Atlas-friendly) ----------
+def stream_collection(col, query=None, projection=None, chunk: int = CHUNK_SIZE):
+    """
+    Yield documents from `col` in ascending _id order, chunk at a time,
+    without using no_cursor_timeout (safe on Atlas free/low tiers).
+    """
+    query = dict(query or {})
+    last_id = None
+    while True:
+        q = query.copy()
+        if last_id is not None:
+            q["_id"] = {"$gt": last_id}
+        cur = col.find(q, projection).sort("_id", ASCENDING).limit(chunk)
+        batch = 0
+        for doc in cur:
+            last_id = doc["_id"]
+            batch += 1
+            yield doc
+        if batch < chunk:
+            break
+
 # ---------- Normalizers per county ----------
 def norm_harris(doc: Dict[str, Any]) -> Dict[str, Any]:
     group = (doc.get("group") or "").strip() or None
     category = "Criminal" if (group and group.lower() == "criminal") else ("Civil" if group else "Unknown")
-    # full name may be in different places
     full_name = pick(doc.get("name"),
                      ", ".join([doc.get("last_name",""), doc.get("first_middle","")]).strip(", ") or None)
     dob = pick(doc.get("dob"))
@@ -171,7 +214,6 @@ def norm_brazoria(doc: Dict[str, Any]) -> Dict[str, Any]:
     )
 
 def norm_galveston(person: Dict[str, Any], event: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    # We’ll accept either a `persons` doc or a `custody_events` doc; event wins for dates/offenses.
     full_name = pick(person.get("full_name"),
                      (person.get("name") if isinstance(person.get("name"), str) else None))
     dob = person.get("dob")
@@ -226,82 +268,154 @@ def norm_fortbend(doc: Dict[str, Any]) -> Dict[str, Any]:
     )
 
 # ---------- Harvesters (read from existing collections) ----------
+def _count_coll(db, name: str) -> int:
+    try:
+        return db[name].estimated_document_count()
+    except Exception:
+        return 0
+
 def iter_harris(db) -> Iterable[Dict[str, Any]]:
-    for name in ("harris_bond", "harris_misfel", "harris_nafiling"):
+    names = ("harris_bond", "harris_misfel", "harris_nafiling")
+    for name in names:
         if name in db.list_collection_names():
-            for d in db[name].find({}, no_cursor_timeout=True):
+            approx = _count_coll(db, name)
+            L.info(f"Harris: scanning {name} (~{approx} docs) in chunks of {CHUNK_SIZE}")
+            i = 0
+            for d in stream_collection(db[name]):
+                i += 1
+                if i % PROGRESS_EVERY == 0:
+                    L.info(f"Harris: processed {i} {name} docs…")
                 yield norm_harris(d)
+            L.info(f"Harris: finished {name} (processed {i})")
 
 def iter_brazoria(db) -> Iterable[Dict[str, Any]]:
     name = "brazoria_inmates"
     if name in db.list_collection_names():
-        for d in db[name].find({}, no_cursor_timeout=True):
+        approx = _count_coll(db, name)
+        L.info(f"Brazoria: scanning {name} (~{approx} docs) in chunks of {CHUNK_SIZE}")
+        i = 0
+        for d in stream_collection(db[name]):
+            i += 1
+            if i % PROGRESS_EVERY == 0:
+                L.info(f"Brazoria: processed {i} docs…")
             yield norm_brazoria(d)
+        L.info(f"Brazoria: finished {name} (processed {i})")
 
 def iter_galveston(db) -> Iterable[Dict[str, Any]]:
-    # prefer pairing persons with most recent custody_event (if any)
-    persons = list(db["persons"].find({"links.rel":"p2c_detail"}, {"_id":1,"full_name":1,"dob":1}) if "persons" in db.list_collection_names() else [])
-    ev_coll = db["custody_events"] if "custody_events" in db.list_collection_names() else None
-    if ev_coll:
-        # map person_id -> latest event
-        latest = {}
-        for ev in ev_coll.find({"county":"Galveston"}):
+    persons_name = "persons"
+    ev_name = "custody_events"
+
+    if persons_name not in db.list_collection_names():
+        L.info("Galveston: persons collection missing; nothing to do.")
+        return
+
+    # Build latest custody event per person (if the collection exists)
+    latest = {}
+    if ev_name in db.list_collection_names():
+        L.info("Galveston: indexing latest custody_events by person_id (chunked)…")
+        ev_fields = {
+            "person_id": 1, "scraped_at": 1,
+            "booking_number": 1, "status": 1, "booked_at": 1, "released_at": 1,
+            "source_url": 1, "charges": 1, "bonds": 1, "total_bond": 1,
+            "agency": 1, "arrest_date": 1, "race": 1, "sex": 1, "age": 1,
+        }
+        ev_count = 0
+        for ev in stream_collection(db[ev_name], {"county": "Galveston"}, projection=ev_fields):
+            ev_count += 1
             pid = ev.get("person_id")
-            if not pid: continue
+            if not pid:
+                continue
             prev = latest.get(pid)
             cur_ts = ev.get("scraped_at","")
             if not prev or cur_ts > prev.get("scraped_at",""):
                 latest[pid] = ev
-        for p in persons:
-            ev = latest.get(p["_id"])
-            yield norm_galveston(p, ev)
+        L.info(f"Galveston: events indexed = {ev_count}; persons with events = {len(latest)}")
     else:
-        # fall back to persons only
-        for p in persons:
-            yield norm_galveston(p, None)
+        L.info("Galveston: custody_events missing; will normalize from persons only.")
+
+    # Stream persons with p2c links
+    L.info("Galveston: streaming persons with p2c links (chunked)…")
+    i = 0
+    for p in stream_collection(db[persons_name], {"links.rel": "p2c_detail"}, projection={"_id":1,"full_name":1,"dob":1}):
+        i += 1
+        if i % PROGRESS_EVERY == 0:
+            L.info(f"Galveston: processed {i} persons…")
+        ev = latest.get(p["_id"]) if latest else None
+        yield norm_galveston(p, ev)
+    L.info(f"Galveston: finished persons (processed {i})")
 
 def iter_fortbend(db) -> Iterable[Dict[str, Any]]:
     name = "fortbend_inmates"
     if name in db.list_collection_names():
-        for d in db[name].find({}, no_cursor_timeout=True):
+        approx = _count_coll(db, name)
+        L.info(f"Fort Bend: scanning {name} (~{approx} docs) in chunks of {CHUNK_SIZE}")
+        i = 0
+        for d in stream_collection(db[name]):
+            i += 1
+            if i % PROGRESS_EVERY == 0:
+                L.info(f"Fort Bend: processed {i} docs…")
             yield norm_fortbend(d)
+        L.info(f"Fort Bend: finished {name} (processed {i})")
 
 # ---------- Upsert ----------
-def upsert_normals(db, county: str, docs: Iterable[Dict[str, Any]]) -> Tuple[int,int]:
+def upsert_normals(db, county: str, docs: Iterable[Dict[str, Any]], *, dry_run: bool=False) -> Tuple[int,int,int]:
     tgt = f"simple_{county}"
     col = db[tgt]
-    try:
-        col.create_index([("_upsert_key.county", ASCENDING),
-                          ("_upsert_key.category", ASCENDING),
-                          ("_upsert_key.anchor", ASCENDING)], unique=True, background=True)
-        col.create_index([("booking_date", ASCENDING)], background=True)
-        col.create_index([("dob", ASCENDING)], background=True)
-        col.create_index([("last_name", ASCENDING), ("first_name", ASCENDING)], background=True)
-    except Exception:
-        pass
 
-    ops = []
-    ins = upd = 0
-    now = dt.datetime.now(dt.timezone.utc).isoformat()
+    if not dry_run:
+        try:
+            L.info(f"{county.title()}: ensuring indexes on {tgt}…")
+            col.create_index([("_upsert_key.county", ASCENDING),
+                              ("_upsert_key.category", ASCENDING),
+                              ("_upsert_key.anchor", ASCENDING)], unique=True, background=True)
+            col.create_index([("booking_date", ASCENDING)], background=True)
+            col.create_index([("dob", ASCENDING)], background=True)
+            col.create_index([("last_name", ASCENDING), ("first_name", ASCENDING)], background=True)
+        except Exception:
+            pass
+
+    ops: List[UpdateOne] = []
+    ins = upd = seen = 0
+    batch = 0
+    t_batch = time.monotonic()
+
     for d in docs:
+        seen += 1
+        if seen % PROGRESS_EVERY == 0:
+            L.info(f"{county.title()}: normalized {seen} docs…")
+
+        if dry_run:
+            continue
+
         key = d["_upsert_key"]
+        now_iso = dt.datetime.now(dt.timezone.utc).isoformat()
         ops.append(UpdateOne(
             {"_upsert_key": key},
             {"$set": {**{k:v for k,v in d.items() if k != "_upsert_key"},
-                      "normalized_at": now},
-             "$setOnInsert": {"created_at": now}},
+                      "normalized_at": now_iso},
+             "$setOnInsert": {"created_at": now_iso}},
             upsert=True
         ))
+        batch += 1
+
         if len(ops) == 1000:
+            dt_s = time.monotonic() - t_batch
+            L.info(f"{county.title()}: writing batch of 1000 (took {dt_s:.1f}s)…")
             res = col.bulk_write(ops, ordered=False)
             upd += (res.modified_count or 0)
             ins += (res.upserted_count or 0)
             ops = []
-    if ops:
+            batch = 0
+            t_batch = time.monotonic()
+
+    if not dry_run and ops:
+        dt_s = time.monotonic() - t_batch
+        L.info(f"{county.title()}: writing final batch of {len(ops)} (took {dt_s:.1f}s)…")
         res = col.bulk_write(ops, ordered=False)
         upd += (res.modified_count or 0)
         ins += (res.upserted_count or 0)
-    return ins, upd
+
+    return ins, upd, seen
 
 # ---------- CLI ----------
 def main():
@@ -309,15 +423,21 @@ def main():
     ap = argparse.ArgumentParser("Normalize county data into simple_* collections")
     ap.add_argument("--county", default="all", choices=["all"] + COUNTY_ALL,
                     help="Which county to normalize (default: all)")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="Parse & show progress but do not write to Mongo")
     args = ap.parse_args()
 
+    L.info(f"Connecting to Mongo… db={MONGO_DB}")
     client = MongoClient(MONGO_URI)
     db = client[MONGO_DB]
+    L.info("Connected.")
 
-    total_ins = total_upd = 0
+    total_ins = total_upd = total_seen = 0
 
     def run_one(county: str):
-        nonlocal total_ins, total_upd
+        nonlocal total_ins, total_upd, total_seen
+        L.info(f"=== START {county.upper()} ===")
+
         if county == "harris":
             docs = iter_harris(db)
         elif county == "brazoria":
@@ -328,9 +448,10 @@ def main():
             docs = iter_fortbend(db)
         else:
             return
-        ins, upd = upsert_normals(db, county, docs)
-        print(f"[normalize] {county}: inserted={ins} updated={upd}")
-        total_ins += ins; total_upd += upd
+
+        ins, upd, seen = upsert_normals(db, county, docs, dry_run=args.dry_run)
+        L.info(f"=== DONE {county.upper()} | seen={seen} inserted={ins} updated={upd} ===")
+        total_ins += ins; total_upd += upd; total_seen += seen
 
     if args.county == "all":
         for c in COUNTY_ALL:
@@ -338,7 +459,7 @@ def main():
     else:
         run_one(args.county)
 
-    print(f"Done. Total inserted={total_ins} updated={total_upd}")
+    L.info(f"All done. Total seen={total_seen} inserted={total_ins} updated={total_upd} (dry_run={args.dry_run})")
 
 if __name__ == "__main__":
     main()
