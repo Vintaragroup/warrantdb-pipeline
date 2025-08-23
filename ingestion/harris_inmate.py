@@ -478,3 +478,48 @@ def run_harris_ingest(file_date_iso: str | None = None) -> Dict[str, Dict[str, L
         "nafiling": {g: _new_entries(col_n, file_date, window, g) for g in GROUPS},
     }
     return alerts
+
+# --- Class wrapper so scripts.run_ingestion can invoke this scraper uniformly ---
+try:
+    from .base_scraper import BaseScraper
+except Exception:
+    BaseScraper = object  # fallback if imported standalone
+
+class HarrisInmateScraper(BaseScraper):
+    """
+    Thin wrapper that delegates to run_harris_ingest(), which already
+    handles fetching + upserting (idempotent) and returns alerts.
+    This `fetch()` just calls it and emits a summary heartbeat doc.
+    """
+    name = "harris_inmate"
+
+    def __init__(self, db):
+        super().__init__(db)
+
+    def fetch(self):
+        # run the real ingestion (fetch + upsert + de-dupe)
+        alerts = run_harris_ingest()
+
+        # quick counts for the heartbeat
+        def _cnt(kind):
+            by_group = alerts.get(kind, {})
+            return sum(len(by_group.get(g, [])) for g in ("Civil", "Criminal"))
+
+        yield {
+            "_collection": "ingest_runs",
+            "source": "harris_inmate",
+            "run_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "alerts_counts": {
+                "bond": _cnt("bond"),
+                "misfel": _cnt("misfel"),
+                "nafiling": _cnt("nafiling"),
+            },
+            # include samples of “new within window” alerts so you can spot-check
+            "alerts_sample": {
+                "bond":     alerts.get("bond", {}).get("Civil", [])[:3] + alerts.get("bond", {}).get("Criminal", [])[:3],
+                "misfel":   alerts.get("misfel", {}).get("Civil", [])[:3] + alerts.get("misfel", {}).get("Criminal", [])[:3],
+                "nafiling": alerts.get("nafiling", {}).get("Civil", [])[:3] + alerts.get("nafiling", {}).get("Criminal", [])[:3],
+            }
+        }
+        return
+        yield
