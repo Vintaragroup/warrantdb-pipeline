@@ -18,12 +18,83 @@ def _utcnow_iso() -> str:
 def _to_int_money(s: str | None) -> int | None:
     if not s:
         return None
-    # pull the first “$1,234” or “1234” looking number
+    # pull the first "$1,234" or "1234" looking number
     m = re.search(r'(\$?\s*[0-9][0-9,]*)', s.replace('\xa0', ' '))
     if not m:
         return None
     digits = re.sub(r'[^0-9]', '', m.group(1))
     return int(digits) if digits.isdigit() else None
+
+def _parse_date(s: str | None) -> Optional[str]:
+    """Parse various date formats to ISO date string."""
+    if not s:
+        return None
+    s = s.strip()
+    
+    # Handle MM/DD/YYYY format
+    m = re.match(r"(\d{1,2})/(\d{1,2})/(\d{4})", s)
+    if m:
+        mm, dd, yy = map(int, m.groups())
+        try:
+            return dt.datetime(yy, mm, dd).date().isoformat()
+        except Exception:
+            pass
+    
+    # Handle datetime strings like "9/13/2021 1:17:00 PM"
+    m = re.match(r"(\d{1,2})/(\d{1,2})/(\d{4})\s+\d{1,2}:\d{2}:\d{2}\s+[AP]M", s)
+    if m:
+        mm, dd, yy = map(int, m.groups())
+        try:
+            return dt.datetime(yy, mm, dd).date().isoformat()
+        except Exception:
+            pass
+    
+    try:
+        return dt.datetime.fromisoformat(s.replace("Z","")).date().isoformat()
+    except Exception:
+        return None
+
+def _calculate_booking_age_category(booked_date_str: str) -> str:
+    """Calculate how long ago someone was booked and return a category."""
+    if not booked_date_str:
+        return "unknown"
+    
+    try:
+        booked_date = dt.datetime.fromisoformat(booked_date_str.replace("Z", "")).date()
+        current_date = dt.datetime.utcnow().date()
+        days_diff = (current_date - booked_date).days
+        
+        if days_diff < 0:
+            return "future_date"
+        elif days_diff <= 1:
+            return "24_hours_or_less"
+        elif days_diff <= 30:
+            return "0_to_30_days"
+        elif days_diff <= 60:
+            return "30_to_60_days"
+        elif days_diff <= 180:
+            return "60_to_180_days"
+        elif days_diff <= 365:
+            return "180_to_365_days"
+        else:
+            return "365_days_or_older"
+    except Exception as e:
+        print(f"[fortbend] Error calculating booking age: {e}")
+        return "unknown"
+
+def _get_booking_priority(booking_age_category: str) -> int:
+    """Get priority ranking based on booking age (1 = highest priority)."""
+    priority_map = {
+        "24_hours_or_less": 1,
+        "0_to_30_days": 2,
+        "30_to_60_days": 3,
+        "60_to_180_days": 4,
+        "180_to_365_days": 5,
+        "365_days_or_older": 6,
+        "unknown": 7,
+        "future_date": 8
+    }
+    return priority_map.get(booking_age_category, 7)
 
 def _session() -> requests.Session:
     s = requests.Session()
@@ -135,7 +206,7 @@ def fetch_fort_bend_detail(detail_url: str, sess: requests.Session | None = None
                     if v:
                         bond_values.append(v)
 
-    # sometimes “Total Bond” appears outside tables
+    # sometimes "Total Bond" appears outside tables
     if not bond_values:
         txt = soup.get_text(" ", strip=True)
         m2 = re.search(r'total\s+bond[^$0-9]*\$?\s*([0-9][0-9,]*)', txt, flags=re.I)
@@ -227,6 +298,7 @@ def search_fort_bend(
             "detail_url": detail_url,
             "source": "fortbend_inquiry",
             "fetched_at": _utcnow_iso(),
+            "scraped_at": _utcnow_iso(),  # Add for consistency
         }
 
         # Fort Bend columns appear shifted:
@@ -234,6 +306,17 @@ def search_fort_bend(
             row["booking_number"] = row["name"]
             row["name"], row["id"] = row["id"], row["dob"]  # id <= previous tds[2] (VarJailID)
             row["dob"] = None
+
+        # Parse booking date and add categorization
+        booking_date_iso = _parse_date(row.get("booking_date"))
+        if booking_date_iso:
+            row["booking_date_iso"] = booking_date_iso
+            row["booking_age_category"] = _calculate_booking_age_category(booking_date_iso)
+            row["booking_priority"] = _get_booking_priority(row["booking_age_category"])
+        else:
+            row["booking_date_iso"] = None
+            row["booking_age_category"] = "unknown"
+            row["booking_priority"] = 7
 
         if include_details and detail_url:
             try:
@@ -256,4 +339,15 @@ if __name__ == "__main__":
     args = ap.parse_args()
 
     rows = search_fort_bend(last=args.last, first=args.first, include_details=args.details)
-    print(json.dumps({"count": len(rows), "results": rows[:10]}, indent=2))
+    
+    # Enhanced output with booking categories
+    categories = {}
+    for r in rows:
+        cat = r.get("booking_age_category", "unknown")
+        categories[cat] = categories.get(cat, 0) + 1
+    
+    print(json.dumps({
+        "count": len(rows), 
+        "booking_categories": dict(sorted(categories.items())),
+        "results": rows[:10]
+    }, indent=2))

@@ -72,6 +72,49 @@ def _parse_rows(text: str) -> List[List[str]]:
             out.append(row)
     return out
 
+# --- Enhanced booking categorization ---
+def _calculate_booking_age_category(file_date_iso: str) -> str:
+    """Calculate how long ago someone was booked based on file date."""
+    if not file_date_iso:
+        return "unknown"
+    
+    try:
+        file_date = dt.datetime.fromisoformat(file_date_iso.replace("Z", "")).date()
+        current_date = dt.datetime.utcnow().date()
+        days_diff = (current_date - file_date).days
+        
+        if days_diff < 0:
+            return "future_date"
+        elif days_diff <= 1:
+            return "24_hours_or_less"
+        elif days_diff <= 30:
+            return "0_to_30_days"
+        elif days_diff <= 60:
+            return "30_to_60_days"
+        elif days_diff <= 180:
+            return "60_to_180_days"
+        elif days_diff <= 365:
+            return "180_to_365_days"
+        else:
+            return "365_days_or_older"
+    except Exception as e:
+        print(f"[harris] Error calculating booking age: {e}")
+        return "unknown"
+
+def _get_booking_priority(booking_age_category: str) -> int:
+    """Get priority ranking based on booking age (1 = highest priority)."""
+    priority_map = {
+        "24_hours_or_less": 1,
+        "0_to_30_days": 2,
+        "30_to_60_days": 3,
+        "60_to_180_days": 4,
+        "180_to_365_days": 5,
+        "365_days_or_older": 6,
+        "unknown": 7,
+        "future_date": 8
+    }
+    return priority_map.get(booking_age_category, 7)
+
 # ------------------------------
 # NEW SECTION: HTTP session + tokens
 # ------------------------------
@@ -131,7 +174,7 @@ def _download_via_webforms(sess: requests.Session, rel_path: str) -> str:
     r2.raise_for_status()
     return r2.content.decode("utf-8", errors="replace")
 
-# ---------- Parsers (same as before) ----------
+# ---------- Enhanced Parsers ----------
 
 def parse_bond(rows: List[List[str]], file_date: str, group: str) -> List[Dict[str, Any]]:
     docs = []
@@ -160,10 +203,16 @@ def parse_bond(rows: List[List[str]], file_date: str, group: str) -> List[Dict[s
                 "city": c[16] if len(c)>16 else None,
                 "zip": c[17] if len(c)>17 else None,
             },
-            "group": group
+            "group": group,
+            "scraped_at": dt.datetime.now(dt.timezone.utc).isoformat() + "Z",
         }
         doc["name"] = ", ".join([x for x in [doc["last_name"], doc["first_middle"]] if x]) or None
         doc["needs_bond_help"] = _needs_bond_help(doc["bond_amount"], doc["bond_note"])
+        
+        # Add booking categorization
+        doc["booking_age_category"] = _calculate_booking_age_category(file_date)
+        doc["booking_priority"] = _get_booking_priority(doc["booking_age_category"])
+        
         if doc["spn"] or doc["case_number"]:
             docs.append(doc)
     return docs
@@ -193,9 +242,15 @@ def parse_misfel(rows: List[List[str]], file_date: str, group: str) -> List[Dict
                 "zip": c[14] if len(c)>14 else None,
                 "phone": c[15] if len(c)>15 else None,
             },
-            "group": group
+            "group": group,
+            "scraped_at": dt.datetime.now(dt.timezone.utc).isoformat() + "Z",
         }
         doc["needs_bond_help"] = _needs_bond_help(doc["bond_amount"], doc["bond_note"])
+        
+        # Add booking categorization
+        doc["booking_age_category"] = _calculate_booking_age_category(file_date)
+        doc["booking_priority"] = _get_booking_priority(doc["booking_age_category"])
+        
         if doc["spn"] or doc["case_number"]:
             docs.append(doc)
     return docs
@@ -227,10 +282,16 @@ def parse_nafiling(rows: List[List[str]], file_date: str, group: str) -> List[Di
                 "city": c[16] if len(c)>16 else None,
                 "zip": c[17] if len(c)>17 else None,
             },
-            "group": group
+            "group": group,
+            "scraped_at": dt.datetime.now(dt.timezone.utc).isoformat() + "Z",
         }
         doc["name"] = ", ".join([x for x in [doc["last_name"], doc["first_middle"]] if x]) or None
         doc["needs_bond_help"] = _needs_bond_help(doc["bond_amount"], doc["bond_note"])
+        
+        # Add booking categorization
+        doc["booking_age_category"] = _calculate_booking_age_category(file_date)
+        doc["booking_priority"] = _get_booking_priority(doc["booking_age_category"])
+        
         if doc["spn"] or doc["case_number"]:
             docs.append(doc)
     return docs
@@ -249,6 +310,10 @@ def _get_cols(db):
             col.create_index([("first_seen_file_date", ASCENDING)], background=True)
             col.create_index([("last_seen_file_date", ASCENDING)], background=True)
             col.create_index([("group", ASCENDING)], background=True)
+            # Enhanced indexes
+            col.create_index([("booking_age_category", ASCENDING)], background=True)
+            col.create_index([("booking_priority", ASCENDING)], background=True)
+            col.create_index([("scraped_at", ASCENDING)], background=True)
         except Exception:
             pass
     return col_b, col_m, col_n
@@ -289,7 +354,8 @@ def _new_entries(col, file_date: str, window_days: int, group: str) -> List[Dict
                 "offense": doc.get("offense"),
                 "bond_amount": doc.get("bond_amount"),
                 "bond_note": doc.get("bond_note"),
-                "first_seen_file_date": doc.get("first_seen_file_date")
+                "first_seen_file_date": doc.get("first_seen_file_date"),
+                "booking_age_category": doc.get("booking_age_category", "unknown")
             })
     return out
 
@@ -440,6 +506,8 @@ def run_harris_ingest(file_date_iso: str | None = None) -> Dict[str, Dict[str, L
     six = _fetch_six_files_latest()
 
     parsed = {"bond": [], "misfel": [], "nafiling": []}
+    booking_categories = {"bond": {}, "misfel": {}, "nafiling": {}}
+    
     for g in GROUPS:
         # bond
         rows = _parse_rows(six[f"{g}/bond"])
@@ -447,6 +515,9 @@ def run_harris_ingest(file_date_iso: str | None = None) -> Dict[str, Dict[str, L
         for d in docs:
             d["source_url"] = urls_by_key[f"{g}/bond"]
             d["source_filename_date"] = latest_by_key[f"{g}/bond"]
+            # Track categories
+            cat = d.get("booking_age_category", "unknown")
+            booking_categories["bond"][cat] = booking_categories["bond"].get(cat, 0) + 1
         parsed["bond"].extend(docs)
 
         # misfel
@@ -455,6 +526,8 @@ def run_harris_ingest(file_date_iso: str | None = None) -> Dict[str, Dict[str, L
         for d in docs:
             d["source_url"] = urls_by_key[f"{g}/misfel"]
             d["source_filename_date"] = latest_by_key[f"{g}/misfel"]
+            cat = d.get("booking_age_category", "unknown")
+            booking_categories["misfel"][cat] = booking_categories["misfel"].get(cat, 0) + 1
         parsed["misfel"].extend(docs)
 
         # nafiling
@@ -463,7 +536,23 @@ def run_harris_ingest(file_date_iso: str | None = None) -> Dict[str, Dict[str, L
         for d in docs:
             d["source_url"] = urls_by_key[f"{g}/nafiling"]
             d["source_filename_date"] = latest_by_key[f"{g}/nafiling"]
+            cat = d.get("booking_age_category", "unknown")
+            booking_categories["nafiling"][cat] = booking_categories["nafiling"].get(cat, 0) + 1
         parsed["nafiling"].extend(docs)
+
+    # Enhanced logging with booking categories
+    print(f"[harris] Processing complete:")
+    for kind in ("bond", "misfel", "nafiling"):
+        total = len([d for d in parsed[kind]])
+        print(f"  {kind}: {total} records")
+        if booking_categories[kind]:
+            print(f"    breakdown: {dict(sorted(booking_categories[kind].items()))}")
+        
+        # Log success messages with categories
+        for d in parsed[kind][:10]:  # Sample first 10
+            name = d.get("name", "UNKNOWN")
+            category = d.get("booking_age_category", "unknown")
+            print(f"[harris] SUCCESS: {name} [{category}]")
 
     # Mongo upserts (unchanged)
     col_b, col_m, col_n = _get_cols(db)
@@ -479,47 +568,94 @@ def run_harris_ingest(file_date_iso: str | None = None) -> Dict[str, Dict[str, L
     }
     return alerts
 
-# --- Class wrapper so scripts.run_ingestion can invoke this scraper uniformly ---
+# --- Enhanced Class wrapper ---
 try:
-    from .base_scraper import BaseScraper
-except Exception:
-    BaseScraper = object  # fallback if imported standalone
+    from .audited_scraper import AuditedScraper
+except ImportError as e:
+    print(f"[harris] Could not import AuditedScraper: {e}")
+    # fallback if audited_scraper not available
+    try:
+        from .base_scraper import BaseScraper
+        AuditedScraper = BaseScraper
+        print("[harris] Using BaseScraper fallback")
+    except ImportError as e2:
+        print(f"[harris] Could not import BaseScraper: {e2}")
+        raise
 
-class HarrisInmateScraper(BaseScraper):
+class HarrisInmateScraper(AuditedScraper):
     """
-    Thin wrapper that delegates to run_harris_ingest(), which already
-    handles fetching + upserting (idempotent) and returns alerts.
-    This `fetch()` just calls it and emits a summary heartbeat doc.
+    Enhanced wrapper that delegates to run_harris_ingest() with comprehensive
+    monitoring and booking age categorization.
     """
     name = "harris_inmate"
 
     def __init__(self, db):
-        super().__init__(db)
+        # Handle both AuditedScraper and BaseScraper fallback
+        if hasattr(super(), '_audit'):
+            # Full AuditedScraper functionality
+            super().__init__(db, "Harris")
+        else:
+            # Basic BaseScraper fallback
+            super().__init__(db)
 
     def fetch(self):
-        # run the real ingestion (fetch + upsert + de-dupe)
+        # Start audit tracking (only if AuditedScraper is available)
+        if hasattr(self, '_audit_start'):
+            self._audit_start(
+                letters_spec="CSV_DOWNLOAD",
+                first_letters_spec="N/A",
+                append_wildcard=False
+            )
+            
+            # Track data processing metrics
+            self._audit_inc("prefixes_scanned", 6)  # 6 file types processed
+        
+        # Run the real ingestion (fetch + upsert + de-dupe)
         alerts = run_harris_ingest()
 
-        # quick counts for the heartbeat
-        def _cnt(kind):
+        # Count results and track in audit
+        total_alerts = 0
+        for kind in ("bond", "misfel", "nafiling"):
             by_group = alerts.get(kind, {})
-            return sum(len(by_group.get(g, [])) for g in ("Civil", "Criminal"))
+            count = sum(len(by_group.get(g, [])) for g in ("Civil", "Criminal"))
+            total_alerts += count
+        
+        if hasattr(self, '_audit_inc'):
+            self._audit_inc("details_parsed_ok", total_alerts)
+            self._audit_inc("events_yielded", 1)  # One summary event
 
+        # Log booking age summary from alerts
+        booking_summary = {}
+        for kind_alerts in alerts.values():
+            for group_alerts in kind_alerts.values():
+                for alert in group_alerts:
+                    cat = alert.get("booking_age_category", "unknown")
+                    booking_summary[cat] = booking_summary.get(cat, 0) + 1
+
+        if booking_summary:
+            print(f"[harris] BOOKING AGE SUMMARY:")
+            for category, count in sorted(booking_summary.items()):
+                print(f"  {category}: {count} new cases needing help")
+
+        # Yield summary document
         yield {
             "_collection": "ingest_runs",
             "source": "harris_inmate",
             "run_at": dt.datetime.now(dt.timezone.utc).isoformat(),
             "alerts_counts": {
-                "bond": _cnt("bond"),
-                "misfel": _cnt("misfel"),
-                "nafiling": _cnt("nafiling"),
+                "bond": sum(len(alerts.get("bond", {}).get(g, [])) for g in ("Civil", "Criminal")),
+                "misfel": sum(len(alerts.get("misfel", {}).get(g, [])) for g in ("Civil", "Criminal")),
+                "nafiling": sum(len(alerts.get("nafiling", {}).get(g, [])) for g in ("Civil", "Criminal")),
             },
-            # include samples of “new within window” alerts so you can spot-check
+            "booking_categories": dict(sorted(booking_summary.items())),
+            # include samples of "new within window" alerts so you can spot-check
             "alerts_sample": {
-                "bond":     alerts.get("bond", {}).get("Civil", [])[:3] + alerts.get("bond", {}).get("Criminal", [])[:3],
-                "misfel":   alerts.get("misfel", {}).get("Civil", [])[:3] + alerts.get("misfel", {}).get("Criminal", [])[:3],
-                "nafiling": alerts.get("nafiling", {}).get("Civil", [])[:3] + alerts.get("nafiling", {}).get("Criminal", [])[:3],
+                "bond": alerts.get("bond", {}).get("Civil", [])[:3] + alerts.get("bond", {}).get("Criminal", [])[:3],
+                "misfel": alerts.get("misfel", {}).get("Civil", [])[:3] + alerts.get("misfel", {}).get("Criminal", [])[:3],
+                "nafiling": alerts.get("nafiling", {}).get("Civil", [])[:3] + alerts.get("nafiling", {}).get("Criminal", [])[:3]
             }
         }
-        return
-        yield
+        
+        # Finish audit tracking (only if available)
+        if hasattr(self, '_audit_finish'):
+            self._audit_finish()

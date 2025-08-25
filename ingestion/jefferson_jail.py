@@ -1,7 +1,7 @@
 # ingestion/jefferson_jail.py
 from __future__ import annotations
 
-import os, time, re, uuid
+import os, time, re
 import requests
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from datetime import datetime
@@ -9,7 +9,7 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 from pathlib import Path
 
-from .base_scraper import BaseScraper
+from ingestion.audited_scraper import AuditedScraper
 
 BASE = "https://jeffersoncountytx.gov/InmateSearch"
 SEARCH_URL = f"{BASE}/Search/List"
@@ -29,7 +29,6 @@ ROW_DELAY = float(os.getenv("JEFF_ROW_DELAY_SEC", "0.6"))
 REQ_TIMEOUT = int(os.getenv("JEFF_REQ_TIMEOUT", "30"))
 APPEND_WILDCARD_DEFAULT = False  # Wildcards don't work
 MAX_RESULTS_PER_PREFIX = int(os.getenv("JEFF_MAX_RESULTS_PER_PREFIX", "2000"))
-AUDIT_ENABLE = os.getenv("SCRAPER_AUDIT", "true").strip().lower() in ("1","true","yes")
 SNAPSHOT_ENABLE = os.getenv("JEFF_SNAPSHOT", "true").strip().lower() in ("1","true","yes")
 SNAPSHOT_DIR = os.getenv("JEFF_SNAPSHOT_DIR", "debug/jefferson")
 SNAPSHOT_OVERWRITE = os.getenv("JEFF_SNAPSHOT_OVERWRITE", "false").strip().lower() in ("1","true","yes")
@@ -297,41 +296,12 @@ def _looks_like_inmate_detail(html: str) -> bool:
     
     return has_property_divs and has_h1_after_form
 
-def _calculate_booking_age_category(booked_date_str: str) -> str:
-    """Calculate how long ago someone was booked and return a category."""
-    if not booked_date_str:
-        return "unknown"
-    
-    try:
-        # Parse the booking date
-        booked_date = datetime.fromisoformat(booked_date_str).date()
-        current_date = datetime.utcnow().date()
-        days_diff = (current_date - booked_date).days
-        
-        if days_diff < 0:
-            return "future_date"  # Shouldn't happen, but handle it
-        elif days_diff <= 1:
-            return "24_hours_or_less"
-        elif days_diff <= 30:
-            return "0_to_30_days"
-        elif days_diff <= 60:
-            return "30_to_60_days"
-        elif days_diff <= 180:
-            return "60_to_180_days"
-        elif days_diff <= 365:
-            return "180_to_365_days"
-        else:
-            return "365_days_or_older"
-    except Exception as e:
-        print(f"[jeff] Error calculating booking age: {e}")
-        return "unknown"
-
 # ------- main scraper -------
-class JeffersonJailScraper(BaseScraper):
+class JeffersonJailScraper(AuditedScraper):
     name = "jefferson_jail"
 
     def __init__(self, db):
-        super().__init__(db)
+        super().__init__(db, "Jefferson")
         self._sess = requests.Session()
         self._sess.headers.update(UA)
         
@@ -341,47 +311,6 @@ class JeffersonJailScraper(BaseScraper):
             print(f"[jeff] Session initialized, status: {init_response.status_code}")
         except Exception as e:
             print(f"[jeff] Warning: Could not initialize session: {e}")
-
-        self._aud = {
-            "run_id": f"jefferson:{uuid.uuid4()}",
-            "county": "Jefferson",
-            "source": "jefferson_jail",
-            "started_at": datetime.utcnow().isoformat() + "Z",
-            "letters_spec": None,
-            "first_letters_spec": None,
-            "append_wildcard": None,
-            "prefixes_scanned": 0,
-            "detail_links_found": 0,
-            "details_parsed_ok": 0,
-            "upserts_person_inserted": 0,
-            "upserts_person_updated": 0,
-            "events_yielded": 0,
-            "errors": 0,
-            "notes": [],
-        }
-
-    def _audit_emit(self, status: str, extra: Dict[str, Any] | None = None):
-        if not AUDIT_ENABLE:
-            return
-        doc = {
-            "kind": "scrape_audit",
-            "status": status,
-            **self._aud,
-            "ts": datetime.utcnow().isoformat() + "Z",
-        }
-        if extra:
-            doc.update(extra)
-        try:
-            self.db["scrape_audit"].insert_one(doc)
-        except Exception:
-            pass
-
-    def _audit_note(self, msg: str):
-        self._aud["notes"].append(msg)
-        self._audit_emit("note", {"msg": msg})
-
-    def _audit_inc(self, key: str, n: int = 1):
-        self._aud[key] = int(self._aud.get(key, 0)) + n
 
     def _search(self, last_prefix: str, first_prefix: Optional[str], append_wildcard: bool) -> str:
         """Search for inmates - wildcards disabled."""
@@ -456,22 +385,8 @@ class JeffersonJailScraper(BaseScraper):
         if url_match:
             ext_id = f"jefferson:{url_match.group(1)}"
 
-        # Calculate booking age category
+        # Calculate booking age category using parent class method
         booking_date_iso = _iso_date_guess(jail_entry_time)
-        booking_age_category = _calculate_booking_age_category(booking_date_iso)
-        
-        # Determine priority based on recency (most recent = highest priority)
-        priority_map = {
-            "24_hours_or_less": 1,
-            "0_to_30_days": 2,
-            "30_to_60_days": 3,
-            "60_to_180_days": 4,
-            "180_to_365_days": 5,
-            "365_days_or_older": 6,
-            "unknown": 7,
-            "future_date": 8
-        }
-        priority = priority_map.get(booking_age_category, 7)
 
         first, last = _split_name(name)
         
@@ -487,30 +402,30 @@ class JeffersonJailScraper(BaseScraper):
         }
 
         event = {
-            "_collection": "jefferson_events",  # Raw Jefferson data goes here
+            "_collection": "jefferson_events",
             "person_id": None,
             "county": "Jefferson",
             "facility": "Jefferson County Jail",
-            "full_name": name.upper(),  # Add full name to events
-            "first_name": first,        # Add first name to events  
-            "last_name": last,          # Add last name to events
+            "full_name": name.upper(),
+            "first_name": first,
+            "last_name": last,
             "booking_number": None,
             "status": "In Custody",
             "booked_at": booking_date_iso,
-            "booking_age_category": booking_age_category,  # NEW: Time-based category
-            "booking_priority": priority,                   # NEW: Priority ranking (1=most recent)
             "released_at": None,
             "source_url": url,
-            "scraped_at": datetime.utcnow().isoformat() + "Z",
             "charges": charges,
             "bonds": [],
             "total_bond": total_bond_amount if total_bond_amount > 0 else None,
             "agency": arresting_agency,
-            "arrest_date": _iso_date_guess(jail_entry_time),  # Using jail entry as arrest date
+            "arrest_date": _iso_date_guess(jail_entry_time),
             "race": race,
             "sex": gender,
             "age": age_at_arrest,
         }
+        
+        # Add standardized booking age fields using parent class method
+        event = self._enhance_event(event, booking_date_iso)
         
         return {"person": person, "event": event}
 
@@ -521,10 +436,13 @@ class JeffersonJailScraper(BaseScraper):
         append_wildcard = False  # Always false - wildcards don't work
         
         print(f"[jeff] START: letters={letters} first_letters={first_letters or '(none)'}")
-        self._aud["letters_spec"] = letters
-        self._aud["first_letters_spec"] = first_letters or ""
-        self._aud["append_wildcard"] = append_wildcard
-        self._audit_emit("start")
+        
+        # Start audit tracking
+        self._audit_start(
+            letters_spec=letters,
+            first_letters_spec=first_letters or "",
+            append_wildcard=append_wildcard
+        )
 
         def expand_range(spec: str) -> List[str]:
             spec = (spec or "").strip()
@@ -617,7 +535,7 @@ class JeffersonJailScraper(BaseScraper):
                         event = rec["event"]
                         
                         booking_category = event.get("booking_age_category", "unknown")
-                        print(f"[jeff] SUCCESS: {person.get('full_name', 'UNKNOWN')} [{booking_category}]")
+                        self._audit_success(person.get("full_name", "UNKNOWN"), booking_category)
 
                         res = self.upsert_person(person)
                         if res.get("inserted"):
@@ -644,9 +562,5 @@ class JeffersonJailScraper(BaseScraper):
 
         print(f"[jeff] COMPLETED: {total_seen} detail pages processed")
         
-        # Print booking age summary
-        print(f"[jeff] BOOKING AGE SUMMARY:")
-        self._audit_emit("done", {
-            "finished_at": datetime.utcnow().isoformat() + "Z",
-            "summary_seen_links": total_seen
-        })
+        # Finish audit tracking
+        self._audit_finish(summary_seen_links=total_seen)

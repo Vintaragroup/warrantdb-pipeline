@@ -5,7 +5,6 @@ import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 import re
-import json
 from datetime import datetime
 
 BASE = "https://jeffersoncountytx.gov/InmateSearch"
@@ -281,3 +280,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    

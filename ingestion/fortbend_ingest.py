@@ -1,6 +1,6 @@
 # ingestion/fortbend_ingest.py
 import os, sys, time, datetime as dt, signal, json, re
-from typing import Dict, Any
+from typing import Dict, Any, List
 from pymongo import MongoClient, UpdateOne
 from dotenv import load_dotenv
 from pymongo import ASCENDING, IndexModel, errors
@@ -30,6 +30,12 @@ def _ensure_indexes(col):
         IndexModel([("fetched_at", ASCENDING)],        name="fetched_at_idx"),
         IndexModel([("detail_fetched_at", ASCENDING)], name="detail_fetched_at_idx"),
         IndexModel([("source", ASCENDING)],            name="source_idx"),
+        # Enhanced indexes for new fields:
+        IndexModel([("booking_date_iso", ASCENDING)],  name="booking_date_iso_idx"),
+        IndexModel([("booking_age_category", ASCENDING)], name="booking_age_category_idx"),
+        IndexModel([("booking_priority", ASCENDING)],  name="booking_priority_idx"),
+        IndexModel([("is_recent_addition_24h", ASCENDING)], name="recent24_idx"),
+        IndexModel([("scraped_at", ASCENDING)],        name="scraped_at_idx"),
     ]
 
     # Map existing indexes by their key spec, e.g. (("name", 1),)
@@ -51,7 +57,7 @@ def _ensure_indexes(col):
     try:
         col.create_indexes(to_create)
     except errors.OperationFailure as e:
-        # Defensive: create one-by-one and ignore “already exists” conflicts
+        # Defensive: create one-by-one and ignore "already exists" conflicts
         if e.code == 85:  # IndexOptionsConflict
             for m in to_create:
                 try:
@@ -62,7 +68,34 @@ def _ensure_indexes(col):
         else:
             raise
 
+def _augment_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Add recent addition tracking and ensure standardized fields."""
+    now = dt.datetime.now(dt.timezone.utc)
+    day_ago = now - dt.timedelta(days=1)
+    out = []
+    
+    for r in rows:
+        r = dict(r)  # shallow copy
+        
+        # Mark if this record was first seen in last 24h
+        try:
+            first_seen_str = r.get("first_seen_at") or r.get("fetched_at")
+            first_seen = dt.datetime.fromisoformat(first_seen_str.replace("Z", "")) if first_seen_str else None
+        except Exception:
+            first_seen = None
+        r["is_recent_addition_24h"] = bool(first_seen and first_seen >= day_ago)
+        
+        # Ensure booking age fields exist (should be added by updated fortbend_jail.py)
+        if "booking_age_category" not in r:
+            r["booking_age_category"] = "unknown"
+        if "booking_priority" not in r:
+            r["booking_priority"] = 7
+            
+        out.append(r)
+    return out
+
 def _upserts(col, rows):
+    rows = _augment_rows(rows)
     ops = []
     for r in rows:
         key = r.get("id") or r.get("booking_number")
@@ -120,7 +153,8 @@ def ingest_all_letters(
     _ensure_indexes(col)
 
     totals = {"matched": 0, "modified": 0, "upserted": 0, "scraped": 0}
-    per_letter: Dict[str, Dict[str, int]] = {}
+    per_letter: Dict[str, Dict[str, Any]] = {}
+    booking_categories: Dict[str, int] = {}
 
     stop_requested = {"yes": False}
     def _sigint(_sig, _frm):
@@ -142,6 +176,7 @@ def ingest_all_letters(
 
             L.log(f"→ START letter {ch} ({idx}/{len(letters)})")
             t_letter = time.monotonic()
+            letter_categories: Dict[str, int] = {}
 
             # scrape
             try:
@@ -156,9 +191,23 @@ def ingest_all_letters(
                 rows = []
 
             scrape_sec = time.monotonic() - t_letter
-            per_letter[ch] = {"scraped": len(rows)}
+            
+            # Track booking categories for this letter
+            for r in rows:
+                cat = r.get("booking_age_category", "unknown")
+                letter_categories[cat] = letter_categories.get(cat, 0) + 1
+                booking_categories[cat] = booking_categories.get(cat, 0) + 1
+
+            per_letter[ch] = {
+                "scraped": len(rows),
+                "booking_categories": dict(sorted(letter_categories.items()))
+            }
             totals["scraped"] += len(rows)
             L.log(f"   scraped {len(rows)} record(s) in {scrape_sec:.1f}s — upserting to MongoDB Atlas…")
+
+            # Log booking category breakdown for this letter
+            if letter_categories:
+                L.log(f"   booking age breakdown: {dict(sorted(letter_categories.items()))}")
 
             # upsert
             stats = _upserts(col, rows)
@@ -167,18 +216,36 @@ def ingest_all_letters(
                 totals[k] += stats[k]
 
             L.log(f"✓ DONE letter {ch}: upserted={stats['upserted']} matched={stats['matched']} modified={stats['modified']} (letter elapsed {time.monotonic()-t_letter:.1f}s)")
+
+            # Enhanced success logging with categories
+            for r in rows:
+                name = r.get("name", "UNKNOWN")
+                category = r.get("booking_age_category", "unknown")
+                L.log(f"[fortbend] SUCCESS: {name} [{category}]")
+
             time.sleep(LETTER_DELAY_SEC)
 
         L.log("All requested letters processed." if not stop_requested["yes"] else "Stopped by user.")
+        
+        # Final summary with booking categories
+        L.log("BOOKING AGE SUMMARY:")
+        for category, count in sorted(booking_categories.items()):
+            L.log(f"  {category}: {count} inmates")
+            
     finally:
         client.close()
 
-    summary = {"totals": totals, "per_letter": per_letter, "collection": f"{MONGO_DB}.{FORTBEND_COLLECTION}"}
+    summary = {
+        "totals": totals, 
+        "per_letter": per_letter, 
+        "collection": f"{MONGO_DB}.{FORTBEND_COLLECTION}",
+        "booking_categories": dict(sorted(booking_categories.items()))
+    }
     return summary
 
 if __name__ == "__main__":
     import argparse
-    ap = argparse.ArgumentParser("Fort Bend Jail → MongoDB Atlas ingester with live timing")
+    ap = argparse.ArgumentParser("Fort Bend Jail → MongoDB Atlas ingester with enhanced monitoring")
     ap.add_argument("--no-details", action="store_true", help="Skip detail pages (charges/bond)")
     ap.add_argument("--letters", default="A-Z", help="Letters to search: 'A-Z', 'A-M', or a set like 'SMT'")
     ap.add_argument("--detail-every", type=int, default=10, help="Log every N rows (0=off)")

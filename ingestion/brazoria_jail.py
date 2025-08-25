@@ -87,6 +87,48 @@ def _parse_mmddyyyy(s: Optional[str]) -> Optional[dt.date]:
 def _iso_or_none(d: Optional[dt.date]) -> Optional[str]:
     return d.isoformat() if d else None
 
+def _calculate_booking_age_category(booked_date_str: str) -> str:
+    """Calculate how long ago someone was booked and return a category."""
+    if not booked_date_str:
+        return "unknown"
+    
+    try:
+        booked_date = dt.datetime.fromisoformat(booked_date_str.replace("Z", "")).date()
+        current_date = dt.datetime.utcnow().date()
+        days_diff = (current_date - booked_date).days
+        
+        if days_diff < 0:
+            return "future_date"
+        elif days_diff <= 1:
+            return "24_hours_or_less"
+        elif days_diff <= 30:
+            return "0_to_30_days"
+        elif days_diff <= 60:
+            return "30_to_60_days"
+        elif days_diff <= 180:
+            return "60_to_180_days"
+        elif days_diff <= 365:
+            return "180_to_365_days"
+        else:
+            return "365_days_or_older"
+    except Exception as e:
+        print(f"[brazoria] Error calculating booking age: {e}")
+        return "unknown"
+
+def _get_booking_priority(booking_age_category: str) -> int:
+    """Get priority ranking based on booking age (1 = highest priority)."""
+    priority_map = {
+        "24_hours_or_less": 1,
+        "0_to_30_days": 2,
+        "30_to_60_days": 3,
+        "60_to_180_days": 4,
+        "180_to_365_days": 5,
+        "365_days_or_older": 6,
+        "unknown": 7,
+        "future_date": 8
+    }
+    return priority_map.get(booking_age_category, 7)
+
 def fetch_brazoria_detail(detail_url: str, sess: Optional[requests.Session] = None) -> Dict[str, Any]:
     """
     Parse a Tyler 'Jailing Detail' page:
@@ -306,11 +348,19 @@ def search_brazoria(
                     except Exception: pass
                 continue
 
+        booking_date_iso = _iso_or_none(booking_date)
+        
+        # Add booking age categorization
+        booking_age_category = _calculate_booking_age_category(booking_date_iso) if booking_date_iso else "unknown"
+        booking_priority = _get_booking_priority(booking_age_category)
+
         row = {
             "booking_number": tds[0] or None,
             "name": tds[1] or None,
             "booking_date": booking_date_raw,
-            "booking_date_iso": _iso_or_none(booking_date),
+            "booking_date_iso": booking_date_iso,
+            "booking_age_category": booking_age_category,  # NEW
+            "booking_priority": booking_priority,           # NEW
             "release_date": release_date_raw,
             "release_date_iso": _iso_or_none(release_date),
             "arresting_agency": tds[4] or None,
@@ -318,6 +368,7 @@ def search_brazoria(
             "detail_url": detail_url,
             "source": "brazoria_inquiry",
             "fetched_at": _utcnow_iso(),
+            "scraped_at": _utcnow_iso(),  # Add for consistency
         }
         out.append(row)
 

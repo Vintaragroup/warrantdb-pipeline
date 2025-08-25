@@ -15,11 +15,12 @@ from urllib.parse import (
     parse_qs, parse_qsl, urlencode
 )
 from hashlib import sha1 as _sha1
+from pathlib import Path
 
 import certifi
 import httpx
 from bs4 import BeautifulSoup
-from .base_scraper import BaseScraper
+from ingestion.audited_scraper import AuditedScraper
 
 try:
     from gridfs import GridFS  # only used if MUGSHOT_SAVE=gridfs
@@ -28,7 +29,7 @@ except Exception:  # pragma: no cover
 
 BASE = "https://p2c.galvestoncountytx.gov"
 ROSTER_HTML = f"{BASE}/jailinmates.aspx"
-BASE_DOMAIN = urlparse(BASE).hostname or "p2c.galvestoncountytx.gov"  # ✨ added
+BASE_DOMAIN = urlparse(BASE).hostname or "p2c.galvestoncountytx.gov"
 UA = {"User-Agent": "Mozilla/5.0 (compatible; WarrantDB/0.2)"}
 TIMEOUT = 30.0
 
@@ -47,29 +48,34 @@ def _int(name: str, default: int) -> int:
     except Exception:
         return default
 
+# Updated configuration for better performance and control
 TEST_MAX_LINKS = _int("TEST_MAX_LINKS", 0)  # 0 means no limit
-
 SKIP_MUGSHOTS = _bool("SKIP_MUGSHOTS", True)
 MUGSHOT_SAVE_MODE = os.getenv("MUGSHOT_SAVE", "link").strip().lower()  # link|bytes|gridfs
-CONCURRENCY = _int("CONCURRENCY", 20)
+CONCURRENCY = _int("GALV_CONCURRENCY", 10)  # Reduced from 20
 ROWS_MAX = _int("ROWS_MAX", 5000)
+ROW_DELAY = float(os.getenv("GALV_ROW_DELAY_SEC", "0.5"))  # Add delay between requests
+
+# Controlled snapshot system (default OFF)
+SNAPSHOT_ENABLE = os.getenv("GALV_SNAPSHOT", "false").strip().lower() in ("1","true","yes")
+SNAPSHOT_DIR = os.getenv("GALV_SNAPSHOT_DIR", "debug/galveston")
+SNAPSHOT_MAX_TOTAL = int(os.getenv("GALV_MAX_SNAPSHOTS_TOTAL", "50"))
 
 _BAD_NAME_RE = re.compile(
     r"(HOME|DAILY\s+BULLETIN|INMATE\s+INQUIRY|ARRESTS|CRASH\s+REPORTS|WANTED)",
     re.I,
 )
+
+# ---------- Helper functions ----------
 def _money_to_float(s: str) -> Optional[float]:
     s = (s or "").replace(",", "")
     m = re.search(r"\$?\s*([0-9]+(?:\.\d{2})?)", s)
     return float(m.group(1)) if m else None
 
 def _rid_from_url(u: str) -> Optional[str]:
-    """
-    Extract a stable row-id from a detail URL if present. Supports several key names.
-    """
+    """Extract a stable row-id from a detail URL if present."""
     try:
         qs = parse_qs(urlparse(u).query, keep_blank_values=True)
-        # normalize keys to lowercase
         qs = {k.lower(): v for k, v in qs.items()}
         for k in ("rid", "rowid", "row_id", "id", "navid"):
             vals = qs.get(k)
@@ -80,20 +86,82 @@ def _rid_from_url(u: str) -> Optional[str]:
     return None
 
 def _normalize_detail_url(u: str) -> str:
-    """
-    Normalize inmate detail URLs so we don't treat different navids as different pages.
-    - Lowercase the host and path
-    - Drop the 'navid' query param entirely
-    """
+    """Normalize inmate detail URLs so we don't treat different navids as different pages."""
     try:
         s = urlsplit(u)
         host = (s.netloc or "").lower()
         path = (s.path or "").lower()
-        # keep other params except navid
         q = [(k, v) for k, v in parse_qsl(s.query, keep_blank_values=True) if k.lower() != "navid"]
-        return urlunsplit((s.scheme, host, path, urlencode(q), ""))  # drop fragment
+        return urlunsplit((s.scheme, host, path, urlencode(q), ""))
     except Exception:
         return u
+
+def _iso_date_guess(s: str | None) -> Optional[str]:
+    """Parse various date formats to ISO date string."""
+    if not s:
+        return None
+    s = s.strip()
+    
+    # Handle MM/DD/YYYY format
+    m = re.match(r"(\d{1,2})/(\d{1,2})/(\d{4})", s)
+    if m:
+        mm, dd, yy = map(int, m.groups())
+        try:
+            return datetime(yy, mm, dd).date().isoformat()
+        except Exception:
+            pass
+    
+    # Handle datetime strings like "9/13/2021 1:17:00 PM"
+    m = re.match(r"(\d{1,2})/(\d{1,2})/(\d{4})\s+\d{1,2}:\d{2}:\d{2}\s+[AP]M", s)
+    if m:
+        mm, dd, yy = map(int, m.groups())
+        try:
+            return datetime(yy, mm, dd).date().isoformat()
+        except Exception:
+            pass
+    
+    try:
+        return datetime.fromisoformat(s.replace("Z","")).date().isoformat()
+    except Exception:
+        return None
+
+def _write_controlled_snapshot(kind: str, name: str, html: str) -> None:
+    """Controlled snapshot writing."""
+    if not SNAPSHOT_ENABLE:
+        return
+    
+    try:
+        os.makedirs(SNAPSHOT_DIR, exist_ok=True)
+        
+        # Sanitize filename
+        name = re.sub(r"[^a-zA-Z0-9._-]+", "_", name)[:50]
+        stamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        
+        filename = Path(SNAPSHOT_DIR) / f"{kind}_{stamp}_{name}.html"
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write(html)
+        
+        print(f"[galv] snapshot → {filename}")
+        
+        # Prune old snapshots
+        _prune_snapshots()
+    except Exception:
+        pass  # Never crash on snapshots
+
+def _prune_snapshots() -> None:
+    """Keep snapshot count under control."""
+    try:
+        p = Path(SNAPSHOT_DIR)
+        if not p.exists():
+            return
+            
+        files = sorted(p.glob("*.html"), key=lambda f: f.stat().st_mtime)
+        excess = max(0, len(files) - SNAPSHOT_MAX_TOTAL)
+        
+        for f in files[:excess]:
+            f.unlink()
+    except Exception:
+        pass
 
 @dataclass
 class SniffedRoster:
@@ -102,7 +170,6 @@ class SniffedRoster:
     headers: Dict[str, str]
     post_data: Optional[str]
     cookies: List[Dict[str, Any]]
-
 
 # ---------- Playwright sniff (short, one-shot) ----------
 def _playwright_sniff_roster() -> Optional[SniffedRoster]:
@@ -122,7 +189,6 @@ def _playwright_sniff_roster() -> Optional[SniffedRoster]:
         )
         page = context.new_page()
 
-        # Passive listener: capture ANY jqHandler traffic while we navigate
         def on_response(resp):
             try:
                 url = resp.url
@@ -140,13 +206,11 @@ def _playwright_sniff_roster() -> Optional[SniffedRoster]:
 
         context.on("response", on_response)
 
-        # Navigate into the roster
         try:
             page.goto(f"{BASE}/main.aspx", wait_until="domcontentloaded", timeout=25_000)
         except Exception:
             pass
 
-        # Click through to Jail Inmates if we aren’t already there
         if "jailinmates.aspx" not in (page.url or "").lower():
             for sel in [
                 "a[href*='jailinmates.aspx']",
@@ -163,16 +227,13 @@ def _playwright_sniff_roster() -> Optional[SniffedRoster]:
                 except Exception:
                     pass
 
-        # Ensure we are on the roster URL
         try:
             page.goto(ROSTER_HTML, wait_until="domcontentloaded", timeout=25_000)
         except Exception:
             pass
 
-        # ✅ Force the grid to “All” BEFORE we sniff, so the captured request reflects full size
         _set_show_all(page)
 
-        # Actively wait for the jqGrid data call that usually happens after changing page size
         try:
             resp = page.wait_for_response(
                 lambda r: ("jqHandler.ashx" in r.url),
@@ -188,10 +249,8 @@ def _playwright_sniff_roster() -> Optional[SniffedRoster]:
                     observed["post_data"] = None
                 observed["headers"] = dict(req.headers)
         except Exception:
-            # If we didn’t catch it here, rely on the passive listener above
             pass
 
-        # Snapshot cookies last
         try:
             cookies = context.cookies()
         except Exception:
@@ -220,7 +279,6 @@ def _cookies_for_httpx(cookies: List[Dict[str, Any]]) -> httpx.Cookies:
             continue
     return jar
 
-
 def _bump_rows_in_payload(method: str, url: str, post_data: Optional[str]) -> Tuple[str, Optional[str]]:
     if method.upper() == "POST" and post_data:
         parts = post_data.split("&")
@@ -243,14 +301,8 @@ def _bump_rows_in_payload(method: str, url: str, post_data: Optional[str]) -> Tu
             url = f"{url}{sep}rows={ROWS_MAX}"
         return url, None
 
-
 def _extract_detail_hrefs_from_roster_json(payload_text: str) -> List[str]:
-    """Be very permissive: scan any string value in each row for href or onclick.
-    Supports 3 formats:
-      - href="...detail..."
-      - href='...detail...'
-      - onclick="...('token')"  (we interpret token as detail path if it looks like one)
-    """
+    """Extract detail URLs from jqGrid JSON response."""
     try:
         data = json.loads(payload_text)
     except Exception:
@@ -259,9 +311,8 @@ def _extract_detail_hrefs_from_roster_json(payload_text: str) -> List[str]:
     rows = data.get("rows") or []
     detail_urls: List[str] = []
 
-    # patterns
-    href_dq = re.compile(r'href="([^"]+)"', re.I)                     # href="..."
-    href_sq = re.compile(r"href='([^']+)'", re.I)                     # href='...'
+    href_dq = re.compile(r'href="([^"]+)"', re.I)
+    href_sq = re.compile(r"href='([^']+)'", re.I)
     onclick_href = re.compile(r"onclick\s*=\s*['\"][^(]*\(\s*['\"]([^'\"]+)['\"]\s*\)", re.I)
 
     def _abs(u: str) -> str:
@@ -273,35 +324,28 @@ def _extract_detail_hrefs_from_roster_json(payload_text: str) -> List[str]:
         return ("inmate" in u2 and "detail" in u2) or ("detail" in u2 and u2.endswith(".aspx")) or ("inmates.aspx" in u2)
 
     for row in rows:
-        # jqGrid rows can be {id:..., cell:[...]} or arbitrary dicts
         fields: List[str] = []
 
-        # include "cell" entries
         for c in (row.get("cell") or []):
             if isinstance(c, str):
                 fields.append(c)
 
-        # include ALL string-valued fields in the row as a safety net
         for k, v in row.items():
             if isinstance(v, str):
                 fields.append(v)
 
-        # scan each string for link-ish content
         for s in fields:
             if not s or not isinstance(s, str):
                 continue
-            # href=...
             for rgx in (href_dq, href_sq):
                 m = rgx.search(s)
                 if m:
                     href = _abs(m.group(1))
                     if _looks_like_detail(href) and href not in detail_urls:
                         detail_urls.append(href)
-            # onclick=...('path or token')
             m = onclick_href.search(s)
             if m:
                 token = m.group(1).strip()
-                # Sometimes onclick carries a *relative* url or a key. Try token directly first.
                 if _looks_like_detail(token):
                     href = _abs(token)
                     if href not in detail_urls:
@@ -310,47 +354,33 @@ def _extract_detail_hrefs_from_roster_json(payload_text: str) -> List[str]:
     return detail_urls
 
 def _set_show_all(page) -> None:
-    """
-    Force the jqGrid to show all rows.
-    Tries the dropdown first; if missing, falls back to jqGrid JS API.
-    """
+    """Force the jqGrid to show all rows."""
     try:
-        # Ensure grid present before poking at the pager
         page.wait_for_selector("div.ui-jqgrid", timeout=10_000)
-
-        # Try the visible jqGrid page-size dropdown
         page.wait_for_selector("select.ui-pg-selbox", timeout=5_000)
         dd = page.locator("select.ui-pg-selbox").first
 
-        # Prefer label "All", else pick the LAST option by value
         try:
             dd.select_option(label="All")
         except Exception:
-            # safer than index: read the last option's value and select by value
             opts = dd.locator("option")
-            # .last() works even if there is only 1 option
             last_val = opts.last.get_attribute("value")
             if last_val:
                 dd.select_option(value=last_val)
 
-        # Some P2C skins require an explicit change event to trigger reload
         page.evaluate(
             """(sel) => {
                 const el = document.querySelector(sel);
                 if (!el) return;
-                // Native change
                 el.dispatchEvent(new Event('change', { bubbles: true }));
-                // jQuery change (if available)
                 if (window.$) { try { $(el).change(); } catch(e){} }
             }""",
             "select.ui-pg-selbox",
         )
 
-        # Let the grid issue its XHR
         page.wait_for_timeout(1500)
 
     except Exception:
-        # Fallback: call jqGrid API directly
         try:
             page.evaluate("""() => {
                 if (window.$ && $('#tblII').length) {
@@ -361,7 +391,6 @@ def _set_show_all(page) -> None:
         except Exception:
             pass
 
-# ---------- Detail + Mugshot ----------
 async def _fetch_mugshot(session: httpx.AsyncClient, url: str) -> Optional[bytes]:
     try:
         r = await session.get(url, timeout=TIMEOUT)
@@ -374,26 +403,19 @@ async def _fetch_mugshot(session: httpx.AsyncClient, url: str) -> Optional[bytes
         return None
 
 # ---------- Main scraper ----------
-class GalvestonP2CFastScraper(BaseScraper):
+class GalvestonP2CFastScraper(AuditedScraper):
     name = "galveston_p2c_fast"
 
     def __init__(self, db):
-        super().__init__(db)
-        self._cookiejar = httpx.Cookies()  # shared cookies for all HTTP calls
+        super().__init__(db, "Galveston")
+        self._cookiejar = httpx.Cookies()
 
     def _fetch_jqgrid_json(self) -> Optional[Dict[str, Any]]:
         sniff = _playwright_sniff_roster()
         if not sniff:
             return None
 
-        # NEW: capture cookies for later httpx use
         self._cookiejar = _cookies_for_httpx(sniff.cookies)
-        # optional debug:
-        try:
-            print(f"DEBUG: cookie count from sniff = {len(sniff.cookies or [])}")
-        except Exception:
-            pass
-            self._cookiejar = httpx.Cookies()
 
         url, body = _bump_rows_in_payload(sniff.method, sniff.url, sniff.post_data)
         cookies = _cookies_for_httpx(sniff.cookies)
@@ -408,19 +430,8 @@ class GalvestonP2CFastScraper(BaseScraper):
                     resp = client.get(url, headers=sniff.headers or {})
                 resp.raise_for_status()
                 data = resp.json()
-                # heartbeat
-                yield_doc = {
-                    "_collection": "custody_events",
-                    "county": "Galveston",
-                    "facility": "P2C",
-                    "status": f"DEBUG_JQGRID_JSON: rows={len(data.get('rows') or [])}",
-                    "source_url": ROSTER_HTML,
-                    "scraped_at": datetime.utcnow().isoformat() + "Z",
-                }
-                try:
-                    self.db["custody_events"].insert_one({k: v for k, v in yield_doc.items() if k != "_collection"})
-                except Exception:
-                    pass
+                
+                print(f"[galv] jqGrid JSON: {len(data.get('rows') or [])} rows")
                 return data
         except Exception:
             return None
@@ -430,17 +441,18 @@ class GalvestonP2CFastScraper(BaseScraper):
             from playwright.sync_api import sync_playwright
         except Exception:
             return None
+            
         html = None
         with sync_playwright() as pw:
             browser = pw.chromium.launch(headless=True)
-            context = browser.new_context(ignore_https_errors=(_verify() is False), user_agent=UA["User-Agent"])  # type: ignore
+            context = browser.new_context(ignore_https_errors=(_verify() is False), user_agent=UA["User-Agent"])
             page = context.new_page()
             try:
-                # Go to main, then into the roster, then set "All"
                 try:
                     page.goto(f"{BASE}/main.aspx", wait_until="domcontentloaded", timeout=25_000)
                 except Exception:
                     pass
+                    
                 for sel in ["a[href*='jailinmates.aspx']", "text=/jail inmates/i", "text=/inmate roster/i", "text=/inmates/i"]:
                     try:
                         loc = page.locator(sel).first
@@ -453,7 +465,6 @@ class GalvestonP2CFastScraper(BaseScraper):
 
                 page.goto(ROSTER_HTML, wait_until="domcontentloaded", timeout=25_000)
 
-                # Set page size -> All
                 try:
                     page.wait_for_selector("select.ui-pg-selbox", timeout=10_000)
                     page.locator("select.ui-pg-selbox").first.select_option(label="All")
@@ -462,6 +473,9 @@ class GalvestonP2CFastScraper(BaseScraper):
                     pass
 
                 html = page.content()
+                
+                _write_controlled_snapshot("roster_html", "galveston_roster", html)
+                
             except Exception:
                 html = None
             context.close()
@@ -580,12 +594,12 @@ class GalvestonP2CFastScraper(BaseScraper):
         try:
             from playwright.sync_api import sync_playwright
         except Exception:
-            print("DEBUG: Playwright not available for DOM harvest")
+            print("[galv] Playwright not available for DOM harvest")
             return []
 
         import time
-        max_rows = int(os.getenv("HARVEST_MAX_ROWS", "40"))
-        max_secs = int(os.getenv("HARVEST_MAX_SECONDS", "90"))
+        max_rows = int(os.getenv("HARVEST_MAX_ROWS", "1200"))  # Updated default
+        max_secs = int(os.getenv("HARVEST_MAX_SECONDS", "3600"))  # Updated default
 
         links: List[Dict[str, Any]] = []
         start = time.time()
@@ -599,17 +613,17 @@ class GalvestonP2CFastScraper(BaseScraper):
             return ("inmatedetail.aspx" in lu) and ("navid=" in lu)
 
         with sync_playwright() as pw:
-            browser = pw.chromium.launch(headless=False)
+            browser = pw.chromium.launch(headless=True)
             context = browser.new_context(ignore_https_errors=(_verify() is False),
-                                        user_agent=UA["User-Agent"])  # type: ignore
-            # preload cookies if you set self._cookiejar earlier
+                                        user_agent=UA["User-Agent"])
+            
             try:
                 cj = getattr(self, "_cookiejar", None)
                 if isinstance(cj, httpx.Cookies):
                     preload = [{"name": k, "value": v, "domain": f".{BASE_DOMAIN}", "path": "/"} for k, v in cj.items()]
                     if preload:
                         context.add_cookies(preload)
-                        print(f"DEBUG: preloaded {len(preload)} cookies into Playwright context")
+                        print(f"[galv] Preloaded {len(preload)} cookies")
             except Exception:
                 pass
 
@@ -617,7 +631,6 @@ class GalvestonP2CFastScraper(BaseScraper):
             context.set_default_timeout(4000)
 
             try:
-                # Navigate into roster and set page size to All/max
                 try:
                     page.goto(f"{BASE}/main.aspx", wait_until="domcontentloaded")
                 except Exception:
@@ -629,7 +642,9 @@ class GalvestonP2CFastScraper(BaseScraper):
                         page.wait_for_load_state("domcontentloaded")
                 except Exception:
                     pass
+                    
                 page.goto(ROSTER_HTML, wait_until="domcontentloaded")
+                
                 try:
                     page.locator("select.ui-pg-selbox").first.select_option(label="All")
                     page.wait_for_timeout(900)
@@ -644,29 +659,26 @@ class GalvestonP2CFastScraper(BaseScraper):
                     except Exception:
                         pass
 
-                # === The important part: iterate rows, capture rid, click, record (url, rid) ===
                 row_loc = page.locator("#tblII tr.jqgrow[id]")
                 if row_loc.count() == 0:
                     row_loc = page.locator("#tblII tr[role='row'][id]")
 
                 total = min(max_rows, row_loc.count())
-                print(f"DEBUG: clicking up to {total} rows (cap), time cap = {max_secs}s")
+                print(f"[galv] Clicking up to {total} rows, time cap = {max_secs}s")
 
                 start_row = int(os.getenv("HARVEST_START_ROW", "0"))
                 if start_row >= total:
-                    print(f"DEBUG: HARVEST_START_ROW {start_row} >= total {total}, nothing to do")
+                    print(f"[galv] HARVEST_START_ROW {start_row} >= total {total}, nothing to do")
                     return []
-
-                print(f"DEBUG: starting harvest at row {start_row}/{total}")
 
                 seen_rids = set()
                 for i in range(start_row, total):
                     if time.time() - start > max_secs:
-                        print("DEBUG: harvest time cap reached")
+                        print("[galv] Harvest time cap reached")
                         break
                     try:
-                        if i % 5 == 0:
-                            print(f"DEBUG: clicking row {i}/{total}")
+                        if i % 10 == 0:
+                            print(f"[galv] Processing row {i}/{total}")
 
                         row = row_loc.nth(i)
                         rid = (row.get_attribute("id") or "").strip()
@@ -678,20 +690,19 @@ class GalvestonP2CFastScraper(BaseScraper):
                             row.scroll_into_view_if_needed()
 
                         before_url = page.url
-
-                        # Single click
                         row.click(force=True)
                         page.wait_for_timeout(300)
 
                         cur = page.url
                         if cur != before_url and _accept(cur):
-                            html = page.content()  # snapshot detail HTML
+                            html = page.content()
                             links.append({"url": _abs(cur), "rid": rid, "html": html})
+                            
+                            _write_controlled_snapshot("detail_page", f"inmate_{rid}", html)
 
-                            # go back quickly to roster and keep "All" set
                             try:
                                 page.go_back(wait_until="domcontentloaded")
-                                page.wait_for_timeout(150)
+                                page.wait_for_timeout(int(ROW_DELAY * 1000))
                                 try:
                                     page.locator("select.ui-pg-selbox").first.select_option(label="All")
                                     page.wait_for_timeout(150)
@@ -703,12 +714,16 @@ class GalvestonP2CFastScraper(BaseScraper):
                     except Exception:
                         continue
             finally:
-                try: context.close()
-                except Exception: pass
-                try: browser.close()
-                except Exception: pass
+                try: 
+                    context.close()
+                except Exception: 
+                    pass
+                try: 
+                    browser.close()
+                except Exception: 
+                    pass
 
-        # De-dup by rid only, keep original URL (with navid) and the HTML snapshot
+        # De-dup by rid
         out: List[Dict[str, Any]] = []
         seen_rids = set()
         for item in links:
@@ -718,16 +733,11 @@ class GalvestonP2CFastScraper(BaseScraper):
             seen_rids.add(rid)
             out.append(item)
 
-        print(f"DEBUG: DOM harvest collected {len(out)} items")
-        for idx, it in enumerate(out[:5]):
-            print(f"DEBUG: link[{idx}] = {it.get('url')} rid={it.get('rid')}")
+        print(f"[galv] DOM harvest collected {len(out)} items")
         return out
 
     async def _fetch_detail(self, session: httpx.AsyncClient, url: str, want_mug: bool, rid: str) -> Optional[Dict[str, Any]]:
-        """
-        Fetch one inmate detail page. `rid` is the jqGrid row id (stable, unique).
-        We use rid to build a deterministic external id so upserts never collide.
-        """
+        """Fetch one inmate detail page."""
         try:
             r = await session.get(url, timeout=TIMEOUT)
             r.raise_for_status()
@@ -735,119 +745,7 @@ class GalvestonP2CFastScraper(BaseScraper):
             return None
 
         html = r.text
-        soup = BeautifulSoup(html, "lxml")
-
-        def txt(sel: str) -> str:
-            el = soup.select_one(sel)
-            return (el.get_text(strip=True) if el else "").strip()
-
-        name = txt("#mainContent_CenterColumnContent_lblName")
-        if not name or _BAD_NAME_RE.search(name):
-            return None
-
-        # Parse name and common fields
-        first = last = ""
-        if "," in name:
-            last, first = [x.strip() for x in name.split(",", 1)]
-        age        = txt("#mainContent_CenterColumnContent_lblAge")
-        race       = txt("#mainContent_CenterColumnContent_lblRace")
-        sex        = txt("#mainContent_CenterColumnContent_lblSex")
-        arrest_dt  = txt("#mainContent_CenterColumnContent_lblArrestDate")
-        agency     = txt("#mainContent_CenterColumnContent_lblAgency")
-
-        # Bond (both spellings observed)
-        total_bond = (
-            txt("#mainContent_CenterColumnContent_lblTotalBondAmount")
-            or txt("#mainContent_CenterColumnContent_lblTotalBoundAmount")
-            or None
-        )
-
-        # Charges (skip header row)
-        charges: List[Dict[str, Any]] = []
-        tbl = soup.select_one("#mainContent_CenterColumnContent_dgMainResults")
-        candidate_tables = [tbl] if tbl else []
-        if not candidate_tables:
-            for t in soup.select("table"):
-                heads = [th.get_text(strip=True).lower() for th in t.select("thead th")] or [th.get_text(strip=True).lower() for th in t.find_all("th")]
-                head_str = " ".join(heads)
-                if any(k in head_str for k in ["charge", "offense"]) and any(k in head_str for k in ["bond", "docket", "status"]):
-                    candidate_tables.append(t)
-
-        for t in candidate_tables:
-            rows = t.select("tbody tr") or [tr for tr in t.select("tr") if tr.find_all("td")]
-            # skip header if present
-            start = 1 if rows and rows[0].find_all("th") else 0
-            for tr in rows[start:]:
-                tds = tr.find_all("td")
-                if not tds:
-                    continue
-                if len(tds) >= 4:
-                    charges.append({
-                        "charge": tds[0].get_text(strip=True),
-                        "status": tds[1].get_text(strip=True),
-                        "docket": tds[2].get_text(strip=True),
-                        "bond":   tds[3].get_text(strip=True),
-                    })
-                else:
-                    charges.append({
-                        "charge": tds[0].get_text(strip=True) if len(tds) > 0 else "",
-                        "status": tds[1].get_text(strip=True) if len(tds) > 1 else "",
-                        "docket": tds[2].get_text(strip=True) if len(tds) > 2 else "",
-                        "bond":   tds[3].get_text(strip=True) if len(tds) > 3 else "",
-                    })
-            if charges:
-                break
-
-        # Mugshot
-        mug_url = None
-        img = soup.select_one("#mainContent_CenterColumnContent_imgPhoto")
-        if img and img.get("src"):
-            src = img["src"].strip()
-            mug_url = src if src.startswith("http") else f"{BASE}/{src.lstrip('/')}"
-
-        mug_bytes: Optional[bytes] = None
-        if want_mug and mug_url:
-            mug_bytes = await _fetch_mugshot(session, mug_url)
-
-        full_name = f"{last}, {first}".upper().strip(", ") if (last or first) else name.upper()
-
-        # Build deterministic ext id from jqGrid row id
-        ext_id = f"p2c:{rid}"
-
-        person = {
-            "_ext_id": ext_id,                         # <-- upsert anchor
-            "full_name": full_name,
-            "dob": None,
-            "aka": [],
-            "identifiers": {"booking": []},
-            "contact": {},
-            "media": ([{"rel": "mugshot", "url": mug_url}] if mug_url else []),
-            "links": [{"rel": "p2c_detail", "url": url}],
-            "_mug_bytes": mug_bytes,
-        }
-
-        event = {
-            "_collection": "custody_events",
-            "person_id": None,
-            "county": "Galveston",
-            "facility": "Galveston County Jail (P2C)",
-            "booking_number": None,
-            "status": "In Custody",
-            "booked_at": None,
-            "released_at": None,
-            "source_url": url,
-            "scraped_at": datetime.utcnow().isoformat() + "Z",
-            "charges": charges,
-            "bonds": [],
-            "total_bond": total_bond,
-            "agency": agency,
-            "arrest_date": arrest_dt,
-            "race": race,
-            "sex": sex,
-            "age": age,
-        }
-
-        return {"person": person, "event": event}
+        return self._parse_detail_html(html, url, rid)
 
     def _parse_detail_html(self, html: str, url: str, rid: Optional[str]) -> Optional[Dict[str, Any]]:
         soup = BeautifulSoup(html or "", "lxml")
@@ -875,7 +773,7 @@ class GalvestonP2CFastScraper(BaseScraper):
             or None
         )
 
-        # charges (skip header row)
+        # Extract charges
         charges = []
         t = soup.select_one("#mainContent_CenterColumnContent_dgMainResults")
         tables = [t] if t else []
@@ -893,7 +791,6 @@ class GalvestonP2CFastScraper(BaseScraper):
             for idx, tr in enumerate(rows):
                 tds = tr.find_all("td")
                 if idx == 0:
-                    # header-like row?
                     maybe_head = " ".join(td.get_text(strip=True).lower() for td in tds)
                     if all(k in maybe_head for k in ["charge","status","docket","bond"]):
                         continue
@@ -914,12 +811,13 @@ class GalvestonP2CFastScraper(BaseScraper):
             if charges:
                 break
 
-        # booking number (if present)
+        # Booking number
         booking_no = ""
         bn = soup.select_one("#mainContent_CenterColumnContent_lblBookingNumber")
         if bn:
             booking_no = bn.get_text(strip=True)
 
+        # Mugshot
         img = soup.select_one("#mainContent_CenterColumnContent_imgPhoto")
         mug_url = None
         if img and img.get("src"):
@@ -928,7 +826,10 @@ class GalvestonP2CFastScraper(BaseScraper):
 
         full_name = f"{last}, {first}".upper().strip(", ") if (last or first) else name.upper()
 
-        # EXT ID: prefer booking number, else row id, else stable hash
+        # Calculate booking date ISO using helper function
+        booking_date_iso = _iso_date_guess(arrest_dt)
+
+        # External ID: prefer booking number, else row id, else stable hash
         if booking_no:
             ext_id = f"bk:{booking_no}"
         elif rid:
@@ -949,50 +850,55 @@ class GalvestonP2CFastScraper(BaseScraper):
         }
 
         event = {
-            "_collection": "custody_events",
+            "_collection": "galveston_events",
             "person_id": None,
             "county": "Galveston",
             "facility": "Galveston County Jail (P2C)",
             "booking_number": (booking_no or None),
             "status": "In Custody",
-            "booked_at": None,
+            "booked_at": booking_date_iso,
             "released_at": None,
             "source_url": url,
-            "scraped_at": datetime.utcnow().isoformat() + "Z",
             "charges": charges,
             "bonds": [],
             "total_bond": total_bond,
             "agency": agency,
-            "arrest_date": arrest_dt,
+            "arrest_date": booking_date_iso,
             "race": race,
             "sex": sex,
             "age": age,
         }
+        
+        # Add standardized booking age fields using parent class method
+        event = self._enhance_event(event, booking_date_iso)
+        
         return {"person": person, "event": event}
 
     def fetch(self) -> Iterable[Dict[str, Any]]:
-        print("DEBUG: Starting fetch for GalvestonP2CFastScraper")
+        print("[galv] Starting Galveston P2C scraper")
+        
+        # Start audit tracking
+        self._audit_start()
 
-        # 1) jqGrid sniff → JSON (debug heartbeat)
+        # 1) jqGrid sniff for JSON data
         grid = self._fetch_jqgrid_json()
         rows = (grid or {}).get("rows") or []
-        print(f"DEBUG: jqGrid rows = {len(rows)}")
 
-        # 2) Harvest detail links (and row-ids) via Playwright DOM
+        # 2) Harvest detail links via Playwright DOM
         detail_items = self._harvest_detail_links_via_playwright() or []
+        self._audit_inc("detail_links_found", len(detail_items))
 
-        # Optional cap straight away so we don't over-harvest
         if TEST_MAX_LINKS > 0 and len(detail_items) > TEST_MAX_LINKS:
             detail_items = detail_items[:TEST_MAX_LINKS]
-            print(f"DEBUG: TEST_MAX_LINKS -> truncated harvested items to {len(detail_items)}")
+            print(f"[galv] Limited to {len(detail_items)} items for testing")
 
-        # Coerce to uniform (url, rid, html?) – keep original URL (with navid)
+        # Coerce to uniform format
         coerced: List[Tuple[str, str, Optional[str]]] = []
         for it in detail_items:
             if isinstance(it, dict):
                 url = str(it.get("url") or "")
                 rid = str(it.get("rid") or "")
-                html = it.get("html")  # may be None
+                html = it.get("html")
             elif isinstance(it, (tuple, list)) and len(it) == 2:
                 url, rid = str(it[0] or ""), str(it[1] or "")
                 html = None
@@ -1003,11 +909,7 @@ class GalvestonP2CFastScraper(BaseScraper):
             if url and rid:
                 coerced.append((url, rid, html))
 
-            # DO NOT normalize away navid here; we need it to fetch the correct detail page.
-            if url and rid:
-                coerced.append((url, rid, html))
-
-        # De-duplicate by rid so we don’t process the same row multiple times
+        # De-duplicate by rid
         seen_rids: set[str] = set()
         items: List[Tuple[str, str, Optional[str]]] = []
         for url, rid, html in coerced:
@@ -1016,32 +918,24 @@ class GalvestonP2CFastScraper(BaseScraper):
             seen_rids.add(rid)
             items.append((url, rid, html))
 
-        print(f"DEBUG: Proceeding to fetch/parse {len(items)} detail pages")
-        for i, (u, r, _) in enumerate(items[:5]):
-            print(f"DEBUG: sample pair[{i}] = (rid={r}) {u}")
+        print(f"[galv] Processing {len(items)} detail pages")
+        self._audit_inc("prefixes_scanned", 1)
 
-        # If nothing harvested, fall back to roster table parse
+        # Fallback to roster table if no items harvested
         if not items:
-            print("DEBUG: No pairs harvested, attempting HTML roster fallback...")
+            print("[galv] No items harvested, using HTML roster fallback")
             html = self._render_roster_html()
             if not html:
-                print("DEBUG: Failed to fetch HTML roster")
+                print("[galv] Failed to fetch HTML roster")
                 return
+                
             people = self._parse_roster_table(html)
-            print(f"DEBUG: Parsed {len(people)} people from roster table")
+            print(f"[galv] Parsed {len(people)} people from roster table")
 
-            # Heartbeat event
-            yield {
-                "_collection": "custody_events",
-                "county": "Galveston",
-                "facility": "Galveston County Jail (P2C)",
-                "status": f"DEBUG_ROSTER_TABLE_PARSED: rows={len(people)}",
-                "source_url": ROSTER_HTML,
-                "scraped_at": datetime.utcnow().isoformat() + "Z",
-            }
-
-            # Minimal person + event (roster-only)
+            # Minimal person + event records for roster-only data
             for p in people:
+                booking_date_iso = _iso_date_guess(p.get("arrest_date"))
+                
                 yield {
                     "full_name": p["full_name"],
                     "dob": p.get("dob"),
@@ -1050,36 +944,38 @@ class GalvestonP2CFastScraper(BaseScraper):
                     "contact": {},
                     "media": [],
                     "links": [{"rel": "p2c_roster_html", "url": ROSTER_HTML}],
-                    "demographics": {
-                        "age": p.get("age"),
-                        "race": p.get("race"),
-                        "sex": p.get("sex"),
-                    },
                 }
-                yield {
-                    "_collection": "custody_events",
+                
+                event = {
+                    "_collection": "galveston_events",
                     "person_id": None,
                     "county": "Galveston",
                     "facility": "Galveston County Jail (P2C)",
                     "booking_number": p.get("booking_number"),
                     "status": "In Custody",
-                    "booked_at": None,
+                    "booked_at": booking_date_iso,
                     "released_at": None,
                     "source_url": ROSTER_HTML,
-                    "scraped_at": datetime.utcnow().isoformat() + "Z",
                     "charges": [],
                     "bonds": ([{"amount": p["bond_amount"]}] if p.get("bond_amount") else []),
                     "total_bond": p.get("bond_amount"),
                     "agency": p.get("agency"),
-                    "arrest_date": p.get("arrest_date"),
+                    "arrest_date": booking_date_iso,
                     "race": p.get("race"),
                     "sex": p.get("sex"),
                     "age": p.get("age"),
                 }
-            print("DEBUG: Finished HTML roster fallback")
+                
+                # Add standardized booking age fields
+                event = self._enhance_event(event, booking_date_iso)
+                self._audit_inc("events_yielded", 1)
+                yield event
+                
+            print("[galv] Finished HTML roster fallback")
+            self._audit_finish()
             return
 
-        # 3) Fetch detail HTML (if needed) and parse -> person/event
+        # 3) Process detail pages
         results: List[Dict[str, Any]] = []
 
         async def run_details():
@@ -1096,21 +992,22 @@ class GalvestonP2CFastScraper(BaseScraper):
 
                 async def worker(url: str, rid: str, html_snapshot: Optional[str]):
                     async with sem:
-                        # 1) use the snapshot from the DOM harvester if we have it
                         html = html_snapshot
-                        # 2) otherwise GET the detail page now
                         if not html:
                             try:
                                 resp = await session.get(url, timeout=TIMEOUT)
                                 resp.raise_for_status()
                                 html = resp.text
                             except Exception:
-                                return  # skip this one on error
+                                self._audit_inc("errors", 1)
+                                return
 
-                        # 3) parse html -> {person,event}
-                        rec = self._parse_detail_html(html or "", url, rid)   # see step 2 below
+                        rec = self._parse_detail_html(html or "", url, rid)
                         if rec:
                             results.append(rec)
+                            self._audit_inc("details_parsed_ok", 1)
+                        else:
+                            self._audit_inc("errors", 1)
 
                 await asyncio.gather(*(worker(u, r, h) for (u, r, h) in items))
 
@@ -1120,43 +1017,37 @@ class GalvestonP2CFastScraper(BaseScraper):
             loop = asyncio.get_event_loop()
             loop.run_until_complete(run_details())
 
-        print(f"DEBUG: detail fetch complete; results={len(results)}")
+        print(f"[galv] Detail fetch complete: {len(results)} results")
 
-        # 4) Persist (handle mugshots if configured) and yield docs
-        use_gridfs = (not SKIP_MUGSHOTS) and (MUGSHOT_SAVE_MODE == "gridfs") and (GridFS is not None)
-        fs = GridFS(self.db) if use_gridfs else None  # type: ignore
-
+        # 4) Yield results with audit tracking
         for rec in results:
             person = rec["person"]
             event = rec["event"]
+            
+            booking_category = event.get("booking_age_category", "unknown")
+            self._audit_success(person.get("full_name", "UNKNOWN"), booking_category)
 
-            if person.get("media"):
-                media0 = person["media"][0]
-                mug_bytes = person.pop("_mug_bytes", None)
-                if mug_bytes:
-                    if MUGSHOT_SAVE_MODE == "bytes":
-                        media0["data_b64"] = base64.b64encode(mug_bytes).decode("ascii")
-                    elif use_gridfs and fs is not None:
-                        try:
-                            grid_id = fs.put(mug_bytes, filename=f"galveston_{person['full_name']}.jpg", contentType="image/jpeg")
-                            media0["gridfs_id"] = str(grid_id)
-                        except Exception:
-                            pass
-
-            yield person
+            # Handle person upsert tracking
+            res = self.upsert_person(person)
+            if res.get("inserted"):
+                self._audit_inc("upserts_person_inserted", 1)
+            else:
+                self._audit_inc("upserts_person_updated", 1)
+                
+            pid = res.get("_id")
+            event["person_id"] = pid
+            self._audit_inc("events_yielded", 1)
             yield event
 
-        print("DEBUG: Finished fetch()")
-
-# END of class definition (no more indents from here)
-# ----------------------------------------------------
+        print("[galv] Finished fetch()")
+        self._audit_finish()
 
 if __name__ == "__main__":
-    # quick local smoke test: harvest detail links only
+    # Smoke test
     from storage.mongo_client import get_db
     s = GalvestonP2CFastScraper(get_db())
-
-    print("SMOKE: sniffing jqGrid JSON…")
+    
+    print("SMOKE: sniffing jqGrid JSON...")
     grid = s._fetch_jqgrid_json()
     rows = len((grid or {}).get("rows") or [])
     print("SMOKE: jqGrid rows =", rows)
@@ -1167,10 +1058,10 @@ if __name__ == "__main__":
         print("SMOKE: links from JSON =", len(detail_links))
 
     if not detail_links:
-        print("SMOKE: trying DOM harvest…")
+        print("SMOKE: trying DOM harvest...")
         detail_links = s._harvest_detail_links_via_playwright()
         print("SMOKE: links from DOM =", len(detail_links))
 
     print("SMOKE: sample links:")
-    for u in detail_links[:5]:
+    for u in detail_links[:3]:
         print("  ", u)
