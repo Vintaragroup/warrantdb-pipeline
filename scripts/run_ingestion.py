@@ -9,6 +9,7 @@ SCRAPER_SPECS = {
     "galveston_p2c_fast":  "ingestion.galveston_p2c_fast:GalvestonP2CFastScraper",
     "brazoria_jail":       "ingestion.brazoria_jail:BrazoriaJailScraper",
     "fortbend_jail":       "ingestion.fortbend_jail:FortBendJailScraper",
+    "jefferson_jail":      "ingestion.jefferson_jail:JeffersonJailScraper",
 }
 
 def _load_scraper_class(source: str):
