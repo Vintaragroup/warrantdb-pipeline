@@ -6,3 +6,4 @@ __pycache__/
 .env
 __pycache__/
 .DS_Store
+debug/jefferson/
