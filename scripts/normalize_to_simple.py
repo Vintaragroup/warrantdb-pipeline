@@ -16,7 +16,7 @@ except Exception:
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 MONGO_DB  = os.getenv("MONGO_DB",  "warrantdb")
 
-COUNTY_ALL = ["harris", "brazoria", "galveston", "fortbend"]
+COUNTY_ALL = ["harris", "brazoria", "galveston", "fortbend", "jefferson"]
 
 # Tunables
 PROGRESS_EVERY = int(os.getenv("NORMALIZE_PROGRESS_EVERY", "1000"))  # print every N docs
@@ -267,6 +267,36 @@ def norm_fortbend(doc: Dict[str, Any]) -> Dict[str, Any]:
         extra={k:v for k,v in doc.items() if k not in {"_id"}},
     )
 
+# --- Jefferson normalizer
+def norm_jefferson(doc: Dict[str, Any]) -> Dict[str, Any]:
+    full_name = pick(doc.get("full_name"), doc.get("name"))
+    dob = parse_date_maybe(pick(doc.get("dob")))
+    booking_date = parse_date_maybe(pick(doc.get("booking_date"), doc.get("arrest_date"), doc.get("booked_at")))
+    # charges may be a list of dicts or a string summary
+    offense = None
+    ch = doc.get("charges")
+    if isinstance(ch, list) and ch:
+        offense = ch[0].get("charge") or ch[0].get("description")
+    offense = pick(offense, doc.get("charge_summary"), doc.get("offense"))
+    bond_amount = to_money(pick(doc.get("bond_total"), doc.get("total_bond"), doc.get("bond_amount"), doc.get("bond")))
+    booking_number = pick(doc.get("booking_number"), doc.get("bookingNo"))
+    return build_norm_doc(
+        county="jefferson",
+        category="Criminal",
+        full_name=full_name,
+        dob=dob,
+        booking_date=booking_date,
+        offense=offense,
+        bond=None,
+        bond_amount=bond_amount,
+        booking_number=booking_number,
+        case_number=None,
+        spn=None,
+        source=doc.get("source", "jefferson_jail"),
+        source_id=doc.get("_id"),
+        extra={k: v for k, v in doc.items() if k != "_id"},
+    )
+
 # ---------- Harvesters (read from existing collections) ----------
 def _count_coll(db, name: str) -> int:
     try:
@@ -357,6 +387,27 @@ def iter_fortbend(db) -> Iterable[Dict[str, Any]]:
             yield norm_fortbend(d)
         L.info(f"Fort Bend: finished {name} (processed {i})")
 
+# --- Jefferson iterator
+def iter_jefferson(db) -> Iterable[Dict[str, Any]]:
+    # Support both the correct and a common misspelling seen in Atlas
+    candidates = ["jefferson_events", "jeffereson_events"]
+    existing = [n for n in candidates if n in db.list_collection_names()]
+
+    if not existing:
+        L.info("Jefferson: jefferson_events/jeffereson_events not found; nothing to normalize.")
+        return
+
+    name = existing[0]
+    approx = _count_coll(db, name)
+    L.info(f"Jefferson: scanning {name} (~{approx} docs) in chunks of {CHUNK_SIZE}")
+    i = 0
+    for d in stream_collection(db[name]):
+        i += 1
+        if i % PROGRESS_EVERY == 0:
+            L.info(f"Jefferson: processed {i} docs…")
+        yield norm_jefferson(d)
+    L.info(f"Jefferson: finished {name} (processed {i})")
+
 # ---------- Upsert ----------
 def upsert_normals(db, county: str, docs: Iterable[Dict[str, Any]], *, dry_run: bool=False) -> Tuple[int,int,int]:
     tgt = f"simple_{county}"
@@ -421,8 +472,12 @@ def upsert_normals(db, county: str, docs: Iterable[Dict[str, Any]], *, dry_run: 
 def main():
     import argparse
     ap = argparse.ArgumentParser("Normalize county data into simple_* collections")
-    ap.add_argument("--county", default="all", choices=["all"] + COUNTY_ALL,
-                    help="Which county to normalize (default: all)")
+    ap.add_argument(
+        "--county",
+        default="all",
+        choices=["all", "harris", "brazoria", "galveston", "fortbend", "jefferson"],
+        help="Which county to normalize (default: all)"
+    )
     ap.add_argument("--dry-run", action="store_true",
                     help="Parse & show progress but do not write to Mongo")
     args = ap.parse_args()
@@ -446,6 +501,8 @@ def main():
             docs = iter_galveston(db)
         elif county == "fortbend":
             docs = iter_fortbend(db)
+        elif county == "jefferson":
+            docs = iter_jefferson(db)
         else:
             return
 
