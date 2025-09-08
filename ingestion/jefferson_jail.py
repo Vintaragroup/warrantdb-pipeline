@@ -12,7 +12,10 @@ from pathlib import Path
 from ingestion.audited_scraper import AuditedScraper
 
 BASE = "https://jeffersoncountytx.gov/InmateSearch"
-SEARCH_URL = f"{BASE}/Search/List"
+# The page that contains the search form
+SEARCH_FORM_URL = f"{BASE}/Search"
+# The endpoint that shows the results listing
+SEARCH_LIST_URL = f"{BASE}/Search/List"
 
 # Updated User Agent
 UA = {
@@ -34,6 +37,10 @@ SNAPSHOT_DIR = os.getenv("JEFF_SNAPSHOT_DIR", "debug/jefferson")
 SNAPSHOT_OVERWRITE = os.getenv("JEFF_SNAPSHOT_OVERWRITE", "false").strip().lower() in ("1","true","yes")
 SNAPSHOT_KEEP_PER_KIND = int(os.getenv("JEFF_MAX_SNAPSHOTS_PER_KIND", "20"))
 SNAPSHOT_MAX_TOTAL = int(os.getenv("JEFF_MAX_SNAPSHOTS_TOTAL", "200"))
+
+# Minimum required prefix lengths (site seems to reject too-short queries)
+MIN_LAST_LEN = int(os.getenv("JEFF_MIN_LAST_LEN", "2"))
+MIN_FIRST_LEN = int(os.getenv("JEFF_MIN_FIRST_LEN", "1"))
 SEARCH_DELAY = float(os.getenv("JEFF_SEARCH_DELAY_SEC", "1"))
 
 # ------- helpers -------
@@ -76,6 +83,7 @@ def _prune_global() -> None:
         except Exception:
             pass
 
+
 def _write_snapshot(kind: str, name: str, html: str) -> None:
     if not SNAPSHOT_ENABLE:
         return
@@ -100,9 +108,33 @@ def _write_snapshot(kind: str, name: str, html: str) -> None:
     except Exception:
         pass
 
+
+def _expand_to_min_len(prefixes: List[str], min_len: int) -> List[str]:
+    """Ensure each prefix is at least min_len by expanding with A..Z grid.
+    Example: ["A","B"], min_len=2 -> ["AA".."AZ","BA".."BZ"].
+    """
+    if min_len <= 1:
+        return prefixes
+    out: List[str] = []
+    for p in prefixes:
+        p = (p or "").upper()
+        if len(p) >= min_len:
+            out.append(p)
+            continue
+        # Build cartesian product to reach min_len
+        needed = min_len - len(p)
+        layer = [p]
+        for _ in range(needed):
+            layer = [q + chr(c) for q in layer for c in range(ord('A'), ord('Z') + 1)]
+        out.extend(layer)
+    return out
+
 def _money_to_float(s: str | None) -> Optional[float]:
     if not s:
         return None
+    s = s.strip().upper()
+    if s in {"NO BOND", "N/A", "NA", "NONE", "NO", "N\u00A0A"}:
+        return 0.0
     s = s.replace(",", "").replace("$", "")
     m = re.search(r"([0-9]+(?:\.[0-9]{1,2})?)", s)
     return float(m.group(1)) if m else None
@@ -187,24 +219,46 @@ def _extract_detail_links(list_html: str) -> List[str]:
     return links
 
 def _extract_property_pairs(soup: BeautifulSoup) -> Dict[str, str]:
-    """Extract key-value pairs from detail-property-title/detail-property-value divs."""
+    """Extract key-value pairs from detail page with multiple fallbacks."""
     out: Dict[str, str] = {}
-    
-    # Find all title divs
+
+    # Primary: paired divs
     title_divs = soup.select("div.detail-property-title")
-    
     for title_div in title_divs:
-        title = _clean_txt(title_div.get_text())
+        title = _clean_txt(title_div.get_text()).rstrip(":").strip()
         if not title:
             continue
-            
-        # Find the corresponding value div (should be the next sibling)
         value_div = title_div.find_next_sibling("div", class_="detail-property-value")
         if value_div:
             value = _clean_txt(value_div.get_text())
             out[title] = value
-    
-    return out
+
+    # Secondary: definition lists (dl/dt/dd)
+    if not out:
+        for dt_tag in soup.select("dl dt"):
+            title = _clean_txt(dt_tag.get_text()).rstrip(":")
+            dd = dt_tag.find_next_sibling("dd")
+            if dd:
+                out[title] = _clean_txt(dd.get_text())
+
+    # Normalize keys to canonical map (case-insensitive)
+    norm: Dict[str, str] = {}
+    keymap = {
+        "jail entry time": "Jail Entry Time",
+        "arrest date": "Arrest Date",
+        "arresting agency": "Arresting Agency",
+        "age at arrest": "Age at Arrest",
+        "race": "Race",
+        "gender": "Gender",
+        "sex": "Gender",
+    }
+    for k, v in out.items():
+        lk = k.lower()
+        if lk in keymap:
+            norm[keymap[lk]] = v
+        else:
+            norm[k] = v
+    return norm
 
 def _extract_charges(soup: BeautifulSoup) -> List[Dict[str, str]]:
     """Extract charges from the offenses table."""
@@ -273,28 +327,20 @@ def _looks_like_inmate_detail(html: str) -> bool:
     """Check if this looks like an inmate detail page."""
     if not html:
         return False
-        
     soup = BeautifulSoup(html, "lxml")
-    
-    # Look for the specific detail page structure
     has_property_divs = len(soup.select("div.detail-property-title")) > 0
     has_h1_after_form = False
-    
-    # Check for H1 tag that comes after the search form
     search_form = soup.select_one("div#inmate-search-form")
     if search_form:
-        # Find H1 elements that come after the search form
         for h1 in soup.select("h1"):
-            # Skip the H1 inside the search form
             if search_form in h1.parents:
                 continue
-            # This H1 is outside the search form, likely the inmate name
             text = h1.get_text(strip=True)
             if text and text != "Inmate Search":
                 has_h1_after_form = True
                 break
-    
-    return has_property_divs and has_h1_after_form
+    # Loosen: accept if either property divs or results-table, and h1 after form
+    return (has_property_divs or soup.select_one("table#results-table")) and has_h1_after_form
 
 # ------- main scraper -------
 class JeffersonJailScraper(AuditedScraper):
@@ -304,54 +350,104 @@ class JeffersonJailScraper(AuditedScraper):
         super().__init__(db, "Jefferson")
         self._sess = requests.Session()
         self._sess.headers.update(UA)
+        self._sess.headers["Referer"] = BASE
         
         # Initialize session
         try:
-            init_response = self._sess.get(BASE, timeout=REQ_TIMEOUT)
+            init_response = self._sess.get(SEARCH_FORM_URL, timeout=REQ_TIMEOUT)
             print(f"[jeff] Session initialized, status: {init_response.status_code}")
         except Exception as e:
             print(f"[jeff] Warning: Could not initialize session: {e}")
 
     def _search(self, last_prefix: str, first_prefix: Optional[str], append_wildcard: bool) -> str:
-        """Search for inmates - wildcards disabled."""
-        ln = last_prefix
-        fn = first_prefix or ""
-        
-        # Don't use wildcards - they don't work
-        params = {"lastName": ln}
-        if fn:
-            params["firstName"] = fn
-            
-        print(f"[jeff] Searching: {params}")
-        
-        try:
-            r = self._sess.get(SEARCH_URL, params=params, timeout=REQ_TIMEOUT)
-            print(f"[jeff] Response: {r.status_code}, length: {len(r.text)}")
+        """
+        Submit the Jefferson search form using both last and first prefixes.
+        Falls back to GET if the form cannot be discovered.
+        """
+        from urllib.parse import urljoin
+
+        ln = (last_prefix or "").strip()
+        fn = (first_prefix or "").strip() if first_prefix else ""
+        if not (ln and fn):
+            raise ValueError("Both last and first prefixes required for Jefferson search")
+
+        # 1) Load search page to get cookies and form fields (incl. hidden tokens)
+        start = self._sess.get(SEARCH_FORM_URL, timeout=REQ_TIMEOUT)
+        start.raise_for_status()
+        soup = BeautifulSoup(start.text, "html.parser")
+
+        form = (
+            soup.find("form", id=True) or
+            soup.find("form", attrs={"name": True}) or
+            soup.find("form")
+        )
+        if not form:
+            # Fallback to legacy GET against the list endpoint as a last resort
+            params = {"lastName": ln, "firstName": fn}
+            r = self._sess.get(SEARCH_LIST_URL, params=params, timeout=REQ_TIMEOUT)
             r.raise_for_status()
             return r.text
-        except Exception as e:
-            print(f"[jeff] Search error: {e}")
-            raise
+
+        action = form.get("action") or SEARCH_LIST_URL
+        action_url = urljoin(SEARCH_FORM_URL, action)
+        method = (form.get("method") or "POST").upper()
+
+        # 2) Preserve existing inputs (hidden tokens, etc.)
+        payload: Dict[str, str] = {}
+        for inp in form.find_all("input"):
+            name = inp.get("name")
+            if not name:
+                continue
+            payload[name] = inp.get("value") or ""
+
+        # 3) Heuristically map last/first fields
+        candidates = {k.lower(): k for k in payload.keys()}
+        last_key = (
+            candidates.get("lastname")
+            or candidates.get("last_name")
+            or candidates.get("last")
+            or "lastName"
+        )
+        first_key = (
+            candidates.get("firstname")
+            or candidates.get("first_name")
+            or candidates.get("first")
+            or "firstName"
+        )
+        payload[last_key] = ln
+        payload[first_key] = fn
+        # Ensure our desired params are present in case field name heuristics missed
+        payload.setdefault("lastName", ln)
+        payload.setdefault("firstName", fn)
+
+        # 4) Submit
+        if method == "POST":
+            r = self._sess.post(action_url, data=payload, timeout=REQ_TIMEOUT)
+        else:
+            r = self._sess.get(action_url, params=payload, timeout=REQ_TIMEOUT)
+        print(f"[jeff] Search {method} {action_url} | last={ln} first={fn} | status={r.status_code} len={len(r.text)}")
+        r.raise_for_status()
+        return r.text
 
     def _parse_detail(self, html: str, url: str) -> Optional[Dict[str, Any]]:
         """Parse inmate detail page using the correct structure."""
         soup = BeautifulSoup(html or "", "lxml")
-        
+
         # Extract name from H1 (outside the search form)
         name = ""
         search_form = soup.select_one("div#inmate-search-form")
-        
+
         for h1 in soup.select("h1"):
             # Skip H1 inside the search form
             if search_form and search_form in h1.parents:
                 continue
-            
+
             text = _clean_txt(h1.get_text())
             if text and text != "Inmate Search":
                 name = text
                 print(f"[jeff] Found name: {name}")
                 break
-        
+
         if not name:
             print(f"[jeff] Could not extract inmate name from {url}")
             return None
@@ -381,15 +477,15 @@ class JeffersonJailScraper(AuditedScraper):
 
         # Create external ID from URL (contains unique inmate ID)
         ext_id = None
-        url_match = re.search(r'/Detail/(\d+)', url)
+        url_match = re.search(r"/Detail[s]?/(\d+)", url, re.I)
         if url_match:
             ext_id = f"jefferson:{url_match.group(1)}"
 
         # Calculate booking age category using parent class method
-        booking_date_iso = _iso_date_guess(jail_entry_time)
+        booking_date_iso = _iso_date_guess(jail_entry_time) or _iso_date_guess(properties.get("Arrest Date"))
 
         first, last = _split_name(name)
-        
+
         person = {
             "_ext_id": ext_id or f"jefferson:{name.upper()}|{jail_entry_time or ''}",
             "full_name": name.upper(),
@@ -423,10 +519,10 @@ class JeffersonJailScraper(AuditedScraper):
             "sex": gender,
             "age": age_at_arrest,
         }
-        
+
         # Add standardized booking age fields using parent class method
         event = self._enhance_event(event, booking_date_iso)
-        
+
         return {"person": person, "event": event}
 
     def fetch(self, *, letters: str = "A-C", first_letters: str = "", append_wildcard: Optional[bool] = None) -> Iterable[Dict[str, Any]]:
@@ -434,9 +530,9 @@ class JeffersonJailScraper(AuditedScraper):
         letters = os.getenv("JEFF_LETTERS", letters)
         first_letters = os.getenv("JEFF_FIRST_LETTERS", first_letters)
         append_wildcard = False  # Always false - wildcards don't work
-        
+
         print(f"[jeff] START: letters={letters} first_letters={first_letters or '(none)'}")
-        
+
         # Start audit tracking
         self._audit_start(
             letters_spec=letters,
@@ -462,36 +558,103 @@ class JeffersonJailScraper(AuditedScraper):
             return [spec.upper()]
 
         last_prefixes = expand_range(letters)
-        first_prefixes = expand_range(first_letters) if first_letters else [""]
+        first_prefixes = expand_range(first_letters) if first_letters else ["A","B","C","D","E","F","G","H","I","J","K","L","M","N","O","P","Q","R","S","T","U","V","W","X","Y","Z"]
+        # Enforce minimum prefix lengths required by the site
+        last_prefixes = _expand_to_min_len(last_prefixes, MIN_LAST_LEN)
+        first_prefixes = _expand_to_min_len(first_prefixes, MIN_FIRST_LEN)
 
         total_seen = 0
         consecutive_failures = 0
         MAX_CONSECUTIVE_FAILURES = 5
+        visited_urls: set[str] = set()
 
-        for lp in last_prefixes:
-            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                print(f"[jeff] Stopping due to {consecutive_failures} consecutive failures")
-                break
-                
-            print(f"[jeff] Processing last-prefix = {lp}")
-            
-            for fp in first_prefixes:
-                self._audit_inc("prefixes_scanned", 1)
-                
+        def run_query(lp: str, fp: Optional[str]) -> Optional[str]:
+            try:
+                html = self._search(lp, fp or None, append_wildcard)
+                return html
+            except Exception as e:
+                return None
+
+        def process_links(lp: str, fp: Optional[str], links: List[str]) -> Iterable[Dict[str, Any]]:
+            nonlocal total_seen
+            print(f"[jeff] {lp} {fp or ''} → {len(links)} links")
+
+            # Concurrency controls
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            max_workers = int(os.getenv("JEFF_DETAIL_CONCURRENCY", "8"))
+
+            def fetch_one(idx_url):
+                i, url = idx_url
+                if url in visited_urls:
+                    return None
+                visited_urls.add(url)
                 try:
-                    html = self._search(lp, fp or None, append_wildcard)
-                    consecutive_failures = 0
+                    r = self._sess.get(url, timeout=REQ_TIMEOUT)
+                    r.raise_for_status()
+                    detail_html = r.text
+
+                    if not _looks_like_inmate_detail(detail_html):
+                        self._audit_inc("errors", 1)
+                        return None
+
+                    rec = self._parse_detail(detail_html, r.url)
+                    if not rec:
+                        self._audit_inc("errors", 1)
+                        return None
+
+                    person = rec["person"]
+                    event = rec["event"]
+
+                    booking_category = event.get("booking_age_category", "unknown")
+                    self._audit_success(person.get("full_name", "UNKNOWN"), booking_category)
+
+                    res = self.upsert_person(person)
+                    if res.get("inserted"):
+                        self._audit_inc("upserts_person_inserted", 1)
+                    else:
+                        self._audit_inc("upserts_person_updated", 1)
+
+                    pid = res.get("_id")
+                    event["person_id"] = pid
+                    self._audit_inc("details_parsed_ok", 1)
+                    self._audit_inc("events_yielded", 1)
+                    return event
                 except Exception as e:
+                    self._audit_inc("errors", 1)
+                    return None
+
+            total_seen += len(links)
+            with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                futures = [ex.submit(fetch_one, (i, url)) for i, url in enumerate(links, 1) if url not in visited_urls]
+                for fut in as_completed(futures):
+                    ev = fut.result()
+                    if ev is not None:
+                        yield ev
+
+            # Optional pacing between batches
+            if ROW_DELAY > 0:
+                time.sleep(ROW_DELAY)
+
+        def adaptive_scan(lp: str, fp_list: List[str]) -> Iterable[Dict[str, Any]]:
+            nonlocal consecutive_failures, total_seen
+            for fp in fp_list:
+                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                    print(f"[jeff] Stopping due to {consecutive_failures} consecutive failures")
+                    return
+
+                self._audit_inc("prefixes_scanned", 1)
+                html = run_query(lp, fp or None)
+                if html is None:
                     consecutive_failures += 1
-                    print(f"[jeff] Search error #{consecutive_failures}: {e}")
+                    print(f"[jeff] Search error #{consecutive_failures} for {lp}/{fp or ''}")
                     self._audit_inc("errors", 1)
                     if SEARCH_DELAY > 0:
                         time.sleep(SEARCH_DELAY)
                     continue
 
+                consecutive_failures = 0
                 _write_snapshot("search", f"{lp}_{fp or 'NONE'}", html)
 
-                # Check for "no results" message
                 if "No results found" in html:
                     print(f"[jeff] No results for last={lp}, first={fp or ''}")
                     if SEARCH_DELAY > 0:
@@ -502,65 +665,33 @@ class JeffersonJailScraper(AuditedScraper):
                 self._audit_inc("detail_links_found", len(links))
 
                 if len(links) > MAX_RESULTS_PER_PREFIX:
-                    msg = f"{len(links)} links > cap {MAX_RESULTS_PER_PREFIX}; skipping"
-                    print(f"[jeff] {msg}")
-                    self._audit_note(msg)
+                    # Subdivide first-name prefixes A-M / N-Z (or finer A-Z if needed)
+                    print(f"[jeff] {len(links)} links > cap {MAX_RESULTS_PER_PREFIX}; subdividing first-name prefixes…")
+                    sub_fp = []
+                    if fp and len(fp) == 1:
+                        # Already at single-letter; split further into A-M/N-Z second letter
+                        sub_fp = [fp + chr(c) for c in range(ord('A'), ord('Z') + 1)]
+                    else:
+                        # Split into single-letter A..Z
+                        sub_fp = [chr(c) for c in range(ord('A'), ord('Z') + 1)]
+                    for ev in adaptive_scan(lp, sub_fp):
+                        yield ev
                     if SEARCH_DELAY > 0:
                         time.sleep(SEARCH_DELAY)
                     continue
 
-                print(f"[jeff] {lp} {fp or ''} → {len(links)} links")
                 total_seen += len(links)
-
-                for i, url in enumerate(links):
-                    print(f"[jeff] Processing {i+1}/{len(links)}: {url}")
-                    
-                    try:
-                        r = self._sess.get(url, timeout=REQ_TIMEOUT)
-                        r.raise_for_status()
-                        detail_html = r.text
-
-                        if not _looks_like_inmate_detail(detail_html):
-                            print(f"[jeff] Not a detail page: {r.url}")
-                            self._audit_inc("errors", 1)
-                            continue
-
-                        rec = self._parse_detail(detail_html, r.url)
-                        if not rec:
-                            print(f"[jeff] Failed to parse: {r.url}")
-                            self._audit_inc("errors", 1)
-                            continue
-
-                        person = rec["person"]
-                        event = rec["event"]
-                        
-                        booking_category = event.get("booking_age_category", "unknown")
-                        self._audit_success(person.get("full_name", "UNKNOWN"), booking_category)
-
-                        res = self.upsert_person(person)
-                        if res.get("inserted"):
-                            self._audit_inc("upserts_person_inserted", 1)
-                        else:
-                            self._audit_inc("upserts_person_updated", 1)
-
-                        pid = res.get("_id")
-                        event["person_id"] = pid
-                        self._audit_inc("details_parsed_ok", 1)
-                        self._audit_inc("events_yielded", 1)
-                        yield event
-
-                    except Exception as e:
-                        print(f"[jeff] ERROR processing {url}: {e}")
-                        self._audit_inc("errors", 1)
-                        continue
-
-                    if ROW_DELAY > 0:
-                        time.sleep(ROW_DELAY)
+                for ev in process_links(lp, fp, links):
+                    yield ev
 
                 if SEARCH_DELAY > 0:
                     time.sleep(SEARCH_DELAY)
 
+        for lp in last_prefixes:
+            print(f"[jeff] Processing last-prefix = {lp}")
+            # Site requires both fields; scan using first-name prefixes (with adaptive subdivision inside)
+            for ev in adaptive_scan(lp, first_prefixes):
+                yield ev
+
         print(f"[jeff] COMPLETED: {total_seen} detail pages processed")
-        
-        # Finish audit tracking
         self._audit_finish(summary_seen_links=total_seen)
