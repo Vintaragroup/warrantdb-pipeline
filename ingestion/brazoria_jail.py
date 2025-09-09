@@ -7,6 +7,7 @@ import datetime as dt
 import json
 from typing import List, Dict, Any, Optional, Callable
 from pathlib import Path
+import glob
 from urllib.parse import urljoin
 
 import requests
@@ -19,6 +20,7 @@ SEARCH_PATH = "JailingSearch.aspx"  # expects ?ID=400 plus name params
 # Debug dumps
 DUMP_DIR = Path(os.getenv("BRAZORIA_DUMP_DIR", "debug_dumps/brazoria"))
 DUMP_DIR.mkdir(parents=True, exist_ok=True)
+MAX_DEBUG = int(os.getenv("BRAZORIA_MAX_DEBUG", "20"))
 
 
 def _utcnow() -> dt.datetime:
@@ -55,12 +57,36 @@ def _session() -> requests.Session:
     return s
 
 def _dump_html(content: str, prefix: str, sub: str = "") -> str:
+    """Write HTML debug snapshot and prune older ones to keep the directory small.
+
+    We keep at most `MAX_DEBUG` files in the chosen directory (per subfolder),
+    preferring to retain the most recent files. The prefix is included in the
+    file name and used to help group similar snapshots together.
+    """
     base = (DUMP_DIR / sub) if sub else DUMP_DIR
     base.mkdir(parents=True, exist_ok=True)
     stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-    p = base / f"{prefix}_{stamp}.html"
-    p.write_text(content, encoding="utf-8")
-    return str(p)
+    path = base / f"{prefix}_{stamp}.html"
+    path.write_text(content, encoding="utf-8")
+
+    # Prune older snapshots: keep only the most recent MAX_DEBUG files in this subdir
+    try:
+        # Gather only .html files within the same subdir
+        files = [Path(p) for p in glob.glob(str(base / "*.html"))]
+        if len(files) > MAX_DEBUG:
+            # Sort by modification time (newest first)
+            files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            for old in files[MAX_DEBUG:]:
+                try:
+                    old.unlink(missing_ok=True)
+                except Exception:
+                    # Best-effort cleanup; ignore errors
+                    pass
+    except Exception:
+        # Never let pruning errors affect the main flow
+        pass
+
+    return str(path)
 
 def _abs(base: str, href: Optional[str]) -> Optional[str]:
     return urljoin(base, href) if href else None

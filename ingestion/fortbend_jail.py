@@ -1,5 +1,6 @@
 # ingestion/fortbend_jail.py
 import os
+import glob
 import re
 import time
 import datetime as dt
@@ -118,12 +119,24 @@ DUMP_DIR = Path(os.getenv("FORTBEND_DUMP_DIR", "debug_dumps/fortbend"))
 DUMP_DIR.mkdir(parents=True, exist_ok=True)
 
 def _dump_html(content: str, prefix: str, *, sub: str = "") -> str:
-    """Write HTML to debug folder and return the file path (as string)."""
+    """Write HTML to debug folder and return the file path (as string). Keeps only N most recent files."""
     base = (DUMP_DIR / sub) if sub else DUMP_DIR
     base.mkdir(parents=True, exist_ok=True)
     stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     path = base / f"{prefix}_{stamp}.html"
     path.write_text(content, encoding="utf-8")
+
+    # Prune older debug files, keep only the most recent N
+    max_debug = int(os.getenv("FORTBEND_MAX_DEBUG", "20"))
+    # glob for files matching this prefix in this folder
+    pattern = str(base / f"{prefix}_*.html")
+    files = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
+    for oldfile in files[max_debug:]:
+        try:
+            os.remove(oldfile)
+        except Exception:
+            pass
+
     return str(path)
 
 def fetch_fort_bend_detail(detail_url: str, sess: requests.Session | None = None) -> Dict[str, Any]:
