@@ -1,0 +1,78 @@
+services:
+  # Web API (FastAPI/Uvicorn) — optional if you only need background jobs
+  - type: web
+    name: warrant-api
+    env: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn api.app:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: MONGO_URI
+        sync: false
+      - key: MONGO_DB
+        value: warrantdb
+
+  # Background worker used by scheduled jobs
+  - type: worker
+    name: warrant-pipeline
+    env: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: sleep infinity
+    envVars:
+      - key: MONGO_URI
+        sync: false
+      - key: MONGO_DB
+        value: warrantdb
+      - key: HARRIS_BASE_FILES_URL
+        value: https://www.hcdistrictclerk.com/Common/e-services/Files
+      - key: HARRIS_DATASETS_PAGE
+        value: https://www.hcdistrictclerk.com/Common/e-services/PublicDatasets.aspx
+
+cronJobs:
+  - name: harris-daily
+    schedule: "20 10 * * *"
+    service: warrant-pipeline
+    command: |
+      PIPELINE_SOURCES="harris_inmate" PIPELINE_STEPS="ingest" python -m scripts.run_pipeline
+
+  - name: brazoria-twice-daily
+    schedule: "15 04,16 * * *"
+    service: warrant-pipeline
+    command: |
+      BRAZORIA_FIRST_LETTERS="A-Z" BRAZORIA_LETTERS="A-Z" BRAZORIA_APPEND_WILDCARD=true BRAZORIA_SINCE_DAYS=365 \
+      PIPELINE_SOURCES="brazoria_jail" PIPELINE_STEPS="ingest" python -m scripts.run_pipeline
+
+  - name: fortbend-twice-daily
+    schedule: "20 04,16 * * *"
+    service: warrant-pipeline
+    command: |
+      FORTBEND_FIRST_LETTERS="A-Z" FORTBEND_LETTERS="A-Z" FORTBEND_APPEND_WILDCARD=true FORTBEND_SINCE_DAYS=365 \
+      PIPELINE_SOURCES="fortbend_jail" PIPELINE_STEPS="ingest" python -m scripts.run_pipeline
+
+  - name: galveston-daily
+    schedule: "40 10 * * *"
+    service: warrant-pipeline
+    command: |
+      TEST_MAX_LINKS=0 GALV_CONCURRENCY=10 GALV_ROW_DELAY_SEC=0.5 ROWS_MAX=5000 SKIP_MUGSHOTS=true \
+      PIPELINE_SOURCES="galveston_p2c_fast" PIPELINE_STEPS="ingest" python -m scripts.run_pipeline
+
+  - name: jefferson-twice-daily
+    schedule: "30 04,16 * * *"
+    service: warrant-pipeline
+    command: |
+      JEFF_MIN_LAST_LEN=3 JEFF_MIN_FIRST_LEN=0 JEFF_REQ_TIMEOUT=30 \
+      JEFF_SURNAME_FILE="configs/jefferson_lastnames.txt" \
+      PIPELINE_SOURCES="jefferson_jail" PIPELINE_STEPS="ingest" python -m scripts.run_pipeline
+
+  - name: normalize-morning
+    schedule: "05 11 * * *"
+    service: warrant-pipeline
+    command: |
+      PIPELINE_STEPS="normalize,report" python -m scripts.run_pipeline
+
+  - name: normalize-evening
+    schedule: "05 23 * * *"
+    service: warrant-pipeline
+    command: |
+      PIPELINE_STEPS="normalize,report" python -m scripts.run_pipeline
