@@ -1,3 +1,4 @@
+version: "1"
 services:
   # Web API (FastAPI/Uvicorn) — optional if you only need background jobs
   - type: web
