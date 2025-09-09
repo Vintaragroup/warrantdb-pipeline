@@ -1,0 +1,24 @@
+name: Normalize & Report
+
+on:
+  schedule:
+    - cron: "05 11 * * *"  # 11:05 UTC
+    - cron: "05 23 * * *"  # 23:05 UTC
+  workflow_dispatch: {}
+
+jobs:
+  normalize:
+    runs-on: ubuntu-latest
+    env:
+      MONGO_URI: ${{ secrets.MONGO_URI }}
+      MONGO_DB: warrantdb
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+      - run: python -m pip install --upgrade pip
+      - run: pip install -r requirements.txt
+      - name: Normalize & report
+        run: PIPELINE_STEPS="normalize,report" python -m scripts.run_pipeline

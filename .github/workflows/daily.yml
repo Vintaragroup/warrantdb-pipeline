@@ -1,0 +1,40 @@
+name: Daily Scrapers
+
+on:
+  schedule:
+    - cron: "20 10 * * *"  # Harris 10:20 UTC
+    - cron: "40 10 * * *"  # Galveston 10:40 UTC
+  workflow_dispatch: {}
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    env:
+      MONGO_URI: ${{ secrets.MONGO_URI }}
+      MONGO_DB: warrantdb
+      HARRIS_BASE_FILES_URL: https://www.hcdistrictclerk.com/Common/e-services/Files
+      HARRIS_DATASETS_PAGE: https://www.hcdistrictclerk.com/Common/e-services/PublicDatasets.aspx
+    strategy:
+      fail-fast: false
+      matrix:
+        task:
+          - name: harris
+            cmd: >
+              PIPELINE_SOURCES="harris_inmate" PIPELINE_STEPS="ingest"
+              python -m scripts.run_pipeline
+          - name: galveston
+            cmd: >
+              TEST_MAX_LINKS=0 GALV_CONCURRENCY=10 GALV_ROW_DELAY_SEC=0.5
+              ROWS_MAX=5000 SKIP_MUGSHOTS=true
+              PIPELINE_SOURCES="galveston_p2c_fast" PIPELINE_STEPS="ingest"
+              python -m scripts.run_pipeline
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+      - run: python -m pip install --upgrade pip
+      - run: pip install -r requirements.txt
+      - name: Run ${{ matrix.task.name }}
+        run: ${{ matrix.task.cmd }}
