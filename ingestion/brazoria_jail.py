@@ -11,6 +11,7 @@ from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
+from ingestion.base_scraper import BaseScraper
 
 BASE = os.getenv("BRAZORIA_BASE_URL", "https://pubweb.brazoriacountytx.gov/PublicAccess/")
 SEARCH_PATH = "JailingSearch.aspx"  # expects ?ID=400 plus name params
@@ -25,6 +26,12 @@ def _utcnow() -> dt.datetime:
 
 def _utcnow_iso() -> str:
     return _utcnow().isoformat()
+
+# JSON datetime serializer for CLI/JSONL output
+def _dt_default(o):
+    if isinstance(o, dt.datetime):
+        return o.replace(tzinfo=dt.timezone.utc).isoformat().replace("+00:00", "Z")
+    return str(o)
 
 def _to_int_money(s: Optional[str]) -> Optional[int]:
     if not s:
@@ -185,7 +192,11 @@ def fetch_brazoria_detail(detail_url: str, sess: Optional[requests.Session] = No
                 bond_values.append(v)
 
     bond_total = sum(bond_values) if len(bond_values) > 1 else (bond_values[0] if bond_values else None)
-    return {"charges": charges, "bond_total": bond_total, "detail_fetched_at": _utcnow_iso()}
+    return {
+        "charges": charges,
+        "bond_total": bond_total,
+        "detail_fetched_at": dt.datetime.now(dt.timezone.utc)
+    }
 
 def _collect_hidden_fields(soup: BeautifulSoup) -> Dict[str, str]:
     data = {}
@@ -367,8 +378,8 @@ def search_brazoria(
             "charges_summary": tds[5] or None,
             "detail_url": detail_url,
             "source": "brazoria_inquiry",
-            "fetched_at": _utcnow_iso(),
-            "scraped_at": _utcnow_iso(),  # Add for consistency
+            "fetched_at": dt.datetime.now(dt.timezone.utc),
+            "scraped_at": dt.datetime.now(dt.timezone.utc),  # store as MongoDB Date
         }
         out.append(row)
 
@@ -390,7 +401,44 @@ def search_brazoria(
 
 def _write_jsonl(rows, out_fp):
     for r in rows:
-        out_fp.write(json.dumps(r, ensure_ascii=False) + "\n")
+        out_fp.write(json.dumps(r, ensure_ascii=False, default=_dt_default) + "\n")
+
+# --- Pipeline wrapper so SCRAPER_SPECS can import BrazoriaJailScraper ---
+class BrazoriaJailScraper(BaseScraper):
+    """
+    Thin wrapper so the class-based pipeline can run Brazoria.
+    Delegates to the existing ingestion logic in ingestion.brazoria_ingest.
+    """
+    source_name = "brazoria_jail"
+
+    def run(self):
+        # Import here to avoid circular imports
+        try:
+            from ingestion.brazoria_ingest import ingest_all_letters
+        except Exception as e:
+            raise RuntimeError(f"Failed to import brazoria_ingest.ingest_all_letters: {e}") from e
+
+        # Read optional knobs from environment (with sensible defaults)
+        letters = os.getenv("BRAZORIA_LETTERS", "A-Z")
+        first_letters = os.getenv("BRAZORIA_FIRST_LETTERS", "")
+        append_wildcard = os.getenv("BRAZORIA_APPEND_WILDCARD", "false").lower() == "true"
+        since_days = int(os.getenv("BRAZORIA_SINCE_DAYS", "365"))
+        tick_every = int(os.getenv("BRAZORIA_TICK_EVERY", "50"))
+        include_details = os.getenv("BRAZORIA_INCLUDE_DETAILS", "true").lower() != "false"
+
+        # Delegate to the working ingestion function that writes to Mongo
+        result = ingest_all_letters(
+            include_details=include_details,
+            letters=letters,
+            first_letters=first_letters or None,
+            verbose=True,
+            tick_every=tick_every,
+            append_wildcard=append_wildcard,
+            since_days=since_days,
+        )
+
+        # If BaseScraper expects counters, return whatever ingest_all_letters returns
+        return result
 
 # -----------------------------------------------
 
@@ -422,4 +470,4 @@ if __name__ == "__main__":
             with open(args.out, "w", encoding="utf-8") as f:
                 _write_jsonl(rows, f)
     else:
-        print(json.dumps({"count": len(rows), "results": rows[:10]}, indent=2))
+        print(json.dumps({"count": len(rows), "results": rows[:10]}, indent=2, default=_dt_default))

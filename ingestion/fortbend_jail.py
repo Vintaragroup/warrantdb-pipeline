@@ -6,9 +6,11 @@ import datetime as dt
 from typing import List, Dict, Any, Optional, Callable
 from pathlib import Path
 from urllib.parse import urljoin
+import inspect
 
 import requests
 from bs4 import BeautifulSoup
+from ingestion.base_scraper import BaseScraper
 
 BASE = os.getenv("FORTBEND_BASE_URL", "https://jailinq.fortbendcountytx.gov/")
 
@@ -297,8 +299,8 @@ def search_fort_bend(
             "booking_date": tds[3] if len(tds) > 3 else None, # sometimes this is race/booking date
             "detail_url": detail_url,
             "source": "fortbend_inquiry",
-            "fetched_at": _utcnow_iso(),
-            "scraped_at": _utcnow_iso(),  # Add for consistency
+            "fetched_at": dt.datetime.now(dt.timezone.utc),
+            "scraped_at": dt.datetime.now(dt.timezone.utc),  # store as MongoDB Date
         }
 
         # Fort Bend columns appear shifted:
@@ -330,6 +332,43 @@ def search_fort_bend(
 
     return rows_out
 
+ # --- Pipeline wrapper so SCRAPER_SPECS can import FortBendJailScraper ---
+class FortBendJailScraper(BaseScraper):
+    """
+    Thin wrapper so the class-based pipeline can run Fort Bend.
+    Delegates to the existing ingestion logic in ingestion.fortbend_ingest.
+    """
+    source_name = "fortbend_jail"
+
+    def run(self):
+        # Import here to avoid circular imports
+        try:
+            from ingestion.fortbend_ingest import ingest_all_letters
+        except Exception as e:
+            raise RuntimeError(f"Failed to import fortbend_ingest.ingest_all_letters: {e}") from e
+
+        # Allow env knobs (mirrors Brazoria)
+        letters = os.getenv("FORTBEND_LETTERS", "A-Z")
+        first_letters = os.getenv("FORTBEND_FIRST_LETTERS", "")
+        append_wildcard = os.getenv("FORTBEND_APPEND_WILDCARD", "false").lower() == "true"
+        since_days = int(os.getenv("FORTBEND_SINCE_DAYS", "365"))
+        tick_every = int(os.getenv("FORTBEND_TICK_EVERY", "50"))
+        include_details = os.getenv("FORTBEND_INCLUDE_DETAILS", "true").lower() != "false"
+
+        # Build kwargs and filter to match ingest_all_letters signature
+        kwargs = {
+            "include_details": include_details,
+            "letters": letters,
+            "first_letters": (first_letters or None),
+            "verbose": True,
+            "tick_every": tick_every,
+            "append_wildcard": append_wildcard,
+            "since_days": since_days,
+        }
+        sig = inspect.signature(ingest_all_letters)
+        filtered = {k: v for k, v in kwargs.items() if k in sig.parameters}
+        return ingest_all_letters(**filtered)
+
 if __name__ == "__main__":
     import argparse, json
     ap = argparse.ArgumentParser("Fort Bend Jail search tester")
@@ -345,9 +384,14 @@ if __name__ == "__main__":
     for r in rows:
         cat = r.get("booking_age_category", "unknown")
         categories[cat] = categories.get(cat, 0) + 1
+
+    def _dt_default(o):
+        if isinstance(o, dt.datetime):
+            return o.replace(tzinfo=dt.timezone.utc).isoformat().replace("+00:00", "Z")
+        return str(o)
     
     print(json.dumps({
         "count": len(rows), 
         "booking_categories": dict(sorted(categories.items())),
         "results": rows[:10]
-    }, indent=2))
+    }, indent=2, default=_dt_default))

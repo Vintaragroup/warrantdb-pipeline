@@ -35,21 +35,29 @@ def main():
     events = 0
     last_person_id = None
 
-    for doc in scraper.fetch():
-        coll = doc.pop("_collection", "persons")
+    if hasattr(scraper, "fetch") and callable(getattr(scraper, "fetch")):
+        for doc in scraper.fetch():
+            coll = doc.pop("_collection", "persons")
 
-        if coll == "persons":
-            res = scraper.upsert_person(doc)
-            last_person_id = res.get("_id") or last_person_id
-            if res.get("inserted"):
-                upserts_ins += 1
+            if coll == "persons":
+                res = scraper.upsert_person(doc)
+                last_person_id = res.get("_id") or last_person_id
+                if res.get("inserted"):
+                    upserts_ins += 1
+                else:
+                    upserts_upd += 1
             else:
-                upserts_upd += 1
-        else:
-            if not doc.get("person_id") and last_person_id:
-                doc["person_id"] = last_person_id
-            db[coll].insert_one(doc)
-            events += 1
+                if not doc.get("person_id") and last_person_id:
+                    doc["person_id"] = last_person_id
+                db[coll].insert_one(doc)
+                events += 1
+    elif hasattr(scraper, "run") and callable(getattr(scraper, "run")):
+        result = scraper.run()
+        print(f"[{args.source}] run() completed with result: {result}")
+    else:
+        raise AttributeError(
+            f"{ScraperCls.__name__} has neither fetch() nor run() method"
+        )
 
     print(
         f"Done: {args.source} | "

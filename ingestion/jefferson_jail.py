@@ -1,5 +1,6 @@
-# ingestion/jefferson_jail.py
+
 from __future__ import annotations
+
 
 import os, time, re
 import requests
@@ -8,6 +9,16 @@ from datetime import datetime
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 from pathlib import Path
+
+def load_surnames(path="configs/jefferson_lastnames.txt") -> List[str]:
+    """Load non-empty, stripped lines from a surname file if it exists."""
+    if not os.path.exists(path):
+        return []
+    with open(path, "r", encoding="utf-8") as f:
+        surnames = [line.strip().upper() for line in f if line.strip()]
+    return surnames
+
+
 
 from ingestion.audited_scraper import AuditedScraper
 
@@ -26,6 +37,44 @@ UA = {
     "Connection": "keep-alive",
     "Upgrade-Insecure-Requests": "1",
 }
+
+# --- Surname file constant ---
+SURNAME_FILE = os.getenv("JEFF_SURNAME_FILE", "configs/jefferson_lastnames.txt")
+
+# --- helper to fetch anti-forgery token (robust) ---
+def _discover_antiforgery(sess: requests.Session) -> Dict[str, Optional[str]]:
+    """
+    Return {'form': token_from_hidden, 'header': token_for_header}.
+    Some ASP.NET sites only emit a cookie (.AspNetCore.Antiforgery*). In that case,
+    they expect the matching token in a header named 'RequestVerificationToken'.
+    Also snapshot the form HTML for inspection.
+    """
+    out: Dict[str, Optional[str]] = {"form": None, "header": None}
+    try:
+        r = sess.get(SEARCH_FORM_URL, timeout=REQ_TIMEOUT)
+        r.raise_for_status()
+    except Exception:
+        return out
+    # snapshot the form for debugging
+    _write_snapshot("search_form", "initial", r.text)
+    soup = BeautifulSoup(r.text, "html.parser")
+    hid = soup.find("input", {"name": "__RequestVerificationToken"})
+    if hid and hid.has_attr("value"):
+        out["form"] = hid["value"]
+        out["header"] = hid["value"]
+    # alternate meta placement
+    if not out["form"]:
+        meta = soup.find("meta", {"name": "__RequestVerificationToken"})
+        if meta and meta.has_attr("content"):
+            out["form"] = meta["content"]
+            out["header"] = meta["content"]
+    # antiforgery cookie fallback
+    if not out["header"]:
+        for c in sess.cookies:
+            if ("Antiforgery" in c.name) or ("RequestVerificationToken" in c.name) or c.name.startswith(".AspNetCore.Antiforgery"):
+                out["header"] = c.value
+                break
+    return out
 
 # --- env knobs ---
 ROW_DELAY = float(os.getenv("JEFF_ROW_DELAY_SEC", "0.6"))
@@ -350,7 +399,7 @@ class JeffersonJailScraper(AuditedScraper):
         super().__init__(db, "Jefferson")
         self._sess = requests.Session()
         self._sess.headers.update(UA)
-        self._sess.headers["Referer"] = BASE
+        self._sess.headers["Referer"] = SEARCH_FORM_URL
         
         # Initialize session
         try:
@@ -358,74 +407,35 @@ class JeffersonJailScraper(AuditedScraper):
             print(f"[jeff] Session initialized, status: {init_response.status_code}")
         except Exception as e:
             print(f"[jeff] Warning: Could not initialize session: {e}")
+        self._antiforgery = _discover_antiforgery(self._sess)
+        if not (self._antiforgery.get("form") or self._antiforgery.get("header")):
+            print("[jeff] Warning: could not locate any antiforgery token; searches may fail")
 
     def _search(self, last_prefix: str, first_prefix: Optional[str], append_wildcard: bool) -> str:
         """
-        Submit the Jefferson search form using both last and first prefixes.
-        Falls back to GET if the form cannot be discovered.
+        Submit the Jefferson search using GET with the real form fields.
+        The form snapshot shows METHOD=GET, ACTION=/Search/List, and fields lastName/firstName.
+        We allow last-only queries (first is optional).
         """
-        from urllib.parse import urljoin
-
         ln = (last_prefix or "").strip()
         fn = (first_prefix or "").strip() if first_prefix else ""
-        if not (ln and fn):
-            raise ValueError("Both last and first prefixes required for Jefferson search")
 
-        # 1) Load search page to get cookies and form fields (incl. hidden tokens)
-        start = self._sess.get(SEARCH_FORM_URL, timeout=REQ_TIMEOUT)
-        start.raise_for_status()
-        soup = BeautifulSoup(start.text, "html.parser")
+        if not ln:
+            raise ValueError("Last-name prefix is required for Jefferson search")
 
-        form = (
-            soup.find("form", id=True) or
-            soup.find("form", attrs={"name": True}) or
-            soup.find("form")
-        )
-        if not form:
-            # Fallback to legacy GET against the list endpoint as a last resort
-            params = {"lastName": ln, "firstName": fn}
-            r = self._sess.get(SEARCH_LIST_URL, params=params, timeout=REQ_TIMEOUT)
-            r.raise_for_status()
-            return r.text
+        # Build query params exactly as the live form expects
+        params: Dict[str, str] = {"lastName": ln}
+        if fn:
+            params["firstName"] = fn
 
-        action = form.get("action") or SEARCH_LIST_URL
-        action_url = urljoin(SEARCH_FORM_URL, action)
-        method = (form.get("method") or "POST").upper()
+        headers = {
+            "Referer": SEARCH_FORM_URL,
+            "Origin": "https://jeffersoncountytx.gov",
+        }
 
-        # 2) Preserve existing inputs (hidden tokens, etc.)
-        payload: Dict[str, str] = {}
-        for inp in form.find_all("input"):
-            name = inp.get("name")
-            if not name:
-                continue
-            payload[name] = inp.get("value") or ""
-
-        # 3) Heuristically map last/first fields
-        candidates = {k.lower(): k for k in payload.keys()}
-        last_key = (
-            candidates.get("lastname")
-            or candidates.get("last_name")
-            or candidates.get("last")
-            or "lastName"
-        )
-        first_key = (
-            candidates.get("firstname")
-            or candidates.get("first_name")
-            or candidates.get("first")
-            or "firstName"
-        )
-        payload[last_key] = ln
-        payload[first_key] = fn
-        # Ensure our desired params are present in case field name heuristics missed
-        payload.setdefault("lastName", ln)
-        payload.setdefault("firstName", fn)
-
-        # 4) Submit
-        if method == "POST":
-            r = self._sess.post(action_url, data=payload, timeout=REQ_TIMEOUT)
-        else:
-            r = self._sess.get(action_url, params=payload, timeout=REQ_TIMEOUT)
-        print(f"[jeff] Search {method} {action_url} | last={ln} first={fn} | status={r.status_code} len={len(r.text)}")
+        # GET to the list endpoint (per snapshot: METHOD=GET)
+        r = self._sess.get(SEARCH_LIST_URL, params=params, headers=headers, timeout=REQ_TIMEOUT)
+        print(f"[jeff] Search GET {SEARCH_LIST_URL} | last={ln} first={fn} | status={r.status_code} len={len(r.text)}")
         r.raise_for_status()
         return r.text
 
@@ -557,10 +567,21 @@ class JeffersonJailScraper(AuditedScraper):
                 return [s.strip().upper() for s in spec.split(",") if s.strip()]
             return [spec.upper()]
 
-        last_prefixes = expand_range(letters)
-        first_prefixes = expand_range(first_letters) if first_letters else ["A","B","C","D","E","F","G","H","I","J","K","L","M","N","O","P","Q","R","S","T","U","V","W","X","Y","Z"]
-        # Enforce minimum prefix lengths required by the site
-        last_prefixes = _expand_to_min_len(last_prefixes, MIN_LAST_LEN)
+        # Try to load surname list if available
+        if os.path.exists(SURNAME_FILE):
+            last_prefixes = load_surnames(SURNAME_FILE)
+            if last_prefixes:
+                print(f"[jeff] Loaded {len(last_prefixes)} surnames from {SURNAME_FILE}")
+                # Ignore letters/expand_range when surnames file is present and non-empty
+            else:
+                print(f"[jeff] Surname file {SURNAME_FILE} is empty, falling back to expand_range")
+                last_prefixes = expand_range(letters)
+                last_prefixes = _expand_to_min_len(last_prefixes, MIN_LAST_LEN)
+        else:
+            last_prefixes = expand_range(letters)
+            last_prefixes = _expand_to_min_len(last_prefixes, MIN_LAST_LEN)
+
+        first_prefixes = expand_range(first_letters) if first_letters else [""]
         first_prefixes = _expand_to_min_len(first_prefixes, MIN_FIRST_LEN)
 
         total_seen = 0

@@ -204,7 +204,7 @@ def parse_bond(rows: List[List[str]], file_date: str, group: str) -> List[Dict[s
                 "zip": c[17] if len(c)>17 else None,
             },
             "group": group,
-            "scraped_at": dt.datetime.now(dt.timezone.utc).isoformat() + "Z",
+            "scraped_at": dt.datetime.now(dt.timezone.utc),
         }
         doc["name"] = ", ".join([x for x in [doc["last_name"], doc["first_middle"]] if x]) or None
         doc["needs_bond_help"] = _needs_bond_help(doc["bond_amount"], doc["bond_note"])
@@ -243,7 +243,7 @@ def parse_misfel(rows: List[List[str]], file_date: str, group: str) -> List[Dict
                 "phone": c[15] if len(c)>15 else None,
             },
             "group": group,
-            "scraped_at": dt.datetime.now(dt.timezone.utc).isoformat() + "Z",
+            "scraped_at": dt.datetime.now(dt.timezone.utc),
         }
         doc["needs_bond_help"] = _needs_bond_help(doc["bond_amount"], doc["bond_note"])
         
@@ -283,7 +283,7 @@ def parse_nafiling(rows: List[List[str]], file_date: str, group: str) -> List[Di
                 "zip": c[17] if len(c)>17 else None,
             },
             "group": group,
-            "scraped_at": dt.datetime.now(dt.timezone.utc).isoformat() + "Z",
+            "scraped_at": dt.datetime.now(dt.timezone.utc),
         }
         doc["name"] = ", ".join([x for x in [doc["last_name"], doc["first_middle"]] if x]) or None
         doc["needs_bond_help"] = _needs_bond_help(doc["bond_amount"], doc["bond_note"])
@@ -589,14 +589,21 @@ class HarrisInmateScraper(AuditedScraper):
     """
     name = "harris_inmate"
 
-    def __init__(self, db):
-        # Handle both AuditedScraper and BaseScraper fallback
-        if hasattr(super(), '_audit'):
-            # Full AuditedScraper functionality
+    def __init__(self, *args, **kwargs):
+        # Accept optional db from run_ingestion; tolerate any signature
+        db = args[0] if args else None
+
+        # Try the various parent ctor signatures we might have
+        try:
             super().__init__(db, "Harris")
-        else:
-            # Basic BaseScraper fallback
-            super().__init__(db)
+        except TypeError:
+            try:
+                super().__init__(db)
+            except TypeError:
+                try:
+                    super().__init__()
+                except TypeError:
+                    pass
 
     def fetch(self):
         # Start audit tracking (only if AuditedScraper is available)
