@@ -34,7 +34,9 @@ jobs:
         with:
           python-version: "3.12"
           cache: "pip"
-      - run: python -m pip install --upgrade pip
-      - run: pip install -r requirements.txt
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
       - name: Run ${{ matrix.task.name }}
         run: ${{ matrix.task.cmd }}
