@@ -22,6 +22,32 @@ COUNTY_ALL = ["harris", "brazoria", "galveston", "fortbend", "jefferson"]
 PROGRESS_EVERY = int(os.getenv("NORMALIZE_PROGRESS_EVERY", "1000"))  # print every N docs
 CHUNK_SIZE     = int(os.getenv("NORMALIZE_CHUNK_SIZE", "5000"))      # stream chunk size
 
+# How often to print a normalized sample (0 = disabled)
+SAMPLE_EVERY   = int(os.getenv("NORMALIZE_SAMPLE_EVERY", "500"))
+
+def _format_sample(d: Dict[str, Any]) -> str:
+    # Show just the most important, human-checkable fields
+    keys = [
+        "county", "category",
+        "full_name", "first_name", "last_name",
+        "dob", "booking_date",
+        "offense", "bond", "bond_amount",
+        "booking_number", "case_number", "spn",
+        "source", "time_bucket"
+    ]
+    # Build a stable, short line
+    parts = []
+    for k in keys:
+        v = d.get(k)
+        if v in (None, "", []):
+            continue
+        # keep long strings short for console
+        s = str(v)
+        if len(s) > 120:
+            s = s[:117] + "..."
+        parts.append(f"{k}={s}")
+    return " | ".join(parts)
+
 # ---------- Tiny logger ----------
 class Logger:
     def __init__(self) -> None:
@@ -63,6 +89,82 @@ def parse_date_maybe(s: Optional[str]) -> Optional[str]:
     except Exception:
         return None
 
+# --- Helper: compute_time_bucket and extract_charge_bonds
+def compute_time_bucket(booking_date_iso: Optional[str]) -> Optional[str]:
+    """
+    Return a human-friendly recency bucket based on booking_date (YYYY-MM-DD).
+    Buckets (most specific first):
+      - 24_hours_or_less
+      - 48_hours_or_less
+      - 72_hours_or_less
+      - 7_days_or_less
+      - 0_to_30_days
+      - 30_to_60_days
+      - 60_to_180_days
+      - 180_to_365_days
+      - 365_days_or_older
+    """
+    if not booking_date_iso:
+        return None
+    try:
+        d = dt.date.fromisoformat(booking_date_iso)
+    except Exception:
+        return None
+    today = dt.datetime.now(dt.timezone.utc).date()
+    delta = (today - d).days
+    # Convert sub-day thresholds using integer days where 0 = today, 1 = yesterday, etc.
+    if delta == 0:
+        return "24_hours_or_less"
+    if delta == 1:
+        return "48_hours_or_less"
+    if delta == 2:
+        return "72_hours_or_less"
+    if delta <= 7:
+        return "7_days_or_less"
+    if delta <= 30:
+        return "0_to_30_days"
+    if delta <= 60:
+        return "30_to_60_days"
+    if delta <= 180:
+        return "60_to_180_days"
+    if delta <= 365:
+        return "180_to_365_days"
+    return "365_days_or_older"
+
+def extract_charge_bonds(charges, bonds=None) -> List[Dict[str, Any]]:
+    """
+    Build a normalized list of per-charge bond details when available.
+    Each item looks like:
+      {"charge": str|None, "bond": original_note|None, "amount": float|None}
+    We attempt to read common shapes used across sources.
+    """
+    out: List[Dict[str, Any]] = []
+    # From 'charges' list where each charge may have 'bond', 'bond_amount', 'amount', or similar.
+    if isinstance(charges, list):
+        for ch in charges:
+            if not isinstance(ch, dict):
+                # Sometimes charges are strings.
+                out.append({"charge": str(ch), "bond": None, "amount": None})
+                continue
+            desc = ch.get("charge") or ch.get("description") or ch.get("offense") or ch.get("desc")
+            # Various possible numeric fields
+            amt = None
+            for k in ("bond_amount", "bond_total", "amount", "bond"):
+                if k in ch and ch.get(k) not in (None, "", []):
+                    amt = to_money(ch.get(k))
+                    if amt is not None:
+                        break
+            note = ch.get("bond_note") or ch.get("bond") if isinstance(ch.get("bond"), str) else None
+            out.append({"charge": desc, "bond": note, "amount": amt})
+    # Some sources keep a parallel 'bonds' list with descriptions & amounts
+    if isinstance(bonds, list):
+        for b in bonds:
+            if isinstance(b, dict):
+                desc = b.get("desc") or b.get("description") or b.get("charge")
+                amt = to_money(b.get("amount") or b.get("bond_amount") or b.get("value"))
+                out.append({"charge": desc, "bond": None, "amount": amt})
+    return out
+
 def split_name(full: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
     if not full: return None, None
     f = full.strip()
@@ -101,6 +203,7 @@ def build_norm_doc(
     source: str,
     source_id: Any,
     extra: Dict[str, Any],
+    charge_bonds: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     first, last = split_name(full_name)
     now_iso = dt.datetime.now(dt.timezone.utc).isoformat()
@@ -110,6 +213,8 @@ def build_norm_doc(
         "anchor": pick(booking_number, case_number, spn,
                        f"{(full_name or '').upper()}|{dob or ''}|{booking_date or ''}")
     }
+    time_bucket = compute_time_bucket(booking_date)
+    cb = charge_bonds or []
     return {
         "_upsert_key": key,
         "county": county,
@@ -122,6 +227,8 @@ def build_norm_doc(
         "offense": offense,
         "bond": bond,
         "bond_amount": bond_amount,
+        "charge_bonds": cb,             # per-charge bond breakdowns when available
+        "time_bucket": time_bucket,     # recency categorization
         "booking_number": booking_number,
         "case_number": case_number,
         "spn": spn,
@@ -166,6 +273,7 @@ def norm_harris(doc: Dict[str, Any]) -> Dict[str, Any]:
     booking_number = None
     case_number = pick(doc.get("case_number"))
     spn = pick(doc.get("spn"))
+    cb = extract_charge_bonds(doc.get("charges"))
     return build_norm_doc(
         county="harris",
         category=category,
@@ -181,6 +289,7 @@ def norm_harris(doc: Dict[str, Any]) -> Dict[str, Any]:
         source=doc.get("source","harris"),
         source_id=doc.get("_id"),
         extra={k:v for k,v in doc.items() if k not in {"_id"}},
+        charge_bonds=cb,
     )
 
 def norm_brazoria(doc: Dict[str, Any]) -> Dict[str, Any]:
@@ -196,6 +305,7 @@ def norm_brazoria(doc: Dict[str, Any]) -> Dict[str, Any]:
     case_number = None
     spn = None
     category = "Criminal"  # jail feed
+    cb = extract_charge_bonds(doc.get("charges"))
     return build_norm_doc(
         county="brazoria",
         category=category,
@@ -211,6 +321,7 @@ def norm_brazoria(doc: Dict[str, Any]) -> Dict[str, Any]:
         source="brazoria_inmates",
         source_id=doc.get("_id"),
         extra={k:v for k,v in doc.items() if k not in {"_id"}},
+        charge_bonds=cb,
     )
 
 def norm_galveston(person: Dict[str, Any], event: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -224,6 +335,7 @@ def norm_galveston(person: Dict[str, Any], event: Optional[Dict[str, Any]]) -> D
     if isinstance(charges, list) and charges:
         offense = charges[0].get("charge")
     booking_number = (event or {}).get("booking_number")
+    cb = extract_charge_bonds((event or {}).get("charges"), (event or {}).get("bonds"))
     return build_norm_doc(
         county="galveston",
         category="Criminal",
@@ -240,6 +352,7 @@ def norm_galveston(person: Dict[str, Any], event: Optional[Dict[str, Any]]) -> D
         source_id=person.get("_id") or (event or {}).get("_id"),
         extra={"person": {k:v for k,v in person.items() if k!="_id"},
                "event":  {k:v for k,v in (event or {}).items() if k!="_id"}},
+        charge_bonds=cb,
     )
 
 def norm_fortbend(doc: Dict[str, Any]) -> Dict[str, Any]:
@@ -250,6 +363,7 @@ def norm_fortbend(doc: Dict[str, Any]) -> Dict[str, Any]:
                    doc.get("charge_summary"))
     bond_amount = to_money(doc.get("bond_total"))
     booking_number = doc.get("booking_number")
+    cb = extract_charge_bonds(doc.get("charges"))
     return build_norm_doc(
         county="fortbend",
         category="Criminal",
@@ -265,6 +379,7 @@ def norm_fortbend(doc: Dict[str, Any]) -> Dict[str, Any]:
         source="fortbend_jail",
         source_id=doc.get("_id"),
         extra={k:v for k,v in doc.items() if k not in {"_id"}},
+        charge_bonds=cb,
     )
 
 # --- Jefferson normalizer
@@ -280,6 +395,7 @@ def norm_jefferson(doc: Dict[str, Any]) -> Dict[str, Any]:
     offense = pick(offense, doc.get("charge_summary"), doc.get("offense"))
     bond_amount = to_money(pick(doc.get("bond_total"), doc.get("total_bond"), doc.get("bond_amount"), doc.get("bond")))
     booking_number = pick(doc.get("booking_number"), doc.get("bookingNo"))
+    cb = extract_charge_bonds(doc.get("charges"))
     return build_norm_doc(
         county="jefferson",
         category="Criminal",
@@ -295,6 +411,7 @@ def norm_jefferson(doc: Dict[str, Any]) -> Dict[str, Any]:
         source=doc.get("source", "jefferson_jail"),
         source_id=doc.get("_id"),
         extra={k: v for k, v in doc.items() if k != "_id"},
+        charge_bonds=cb,
     )
 
 # ---------- Harvesters (read from existing collections) ----------
@@ -434,6 +551,13 @@ def upsert_normals(db, county: str, docs: Iterable[Dict[str, Any]], *, dry_run: 
         seen += 1
         if seen % PROGRESS_EVERY == 0:
             L.info(f"{county.title()}: normalized {seen} docs…")
+
+        if SAMPLE_EVERY and (seen % SAMPLE_EVERY == 0):
+            try:
+                L.info(f"{county.title()}: sample → " + _format_sample(d))
+            except Exception:
+                # Never let sampling break normalization
+                pass
 
         if dry_run:
             continue

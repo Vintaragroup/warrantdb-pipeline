@@ -1,0 +1,596 @@
+# Connected to DB: warrantdb
+
+# brazoria_inmates — top-level fields (24)
+- _id
+- arresting_agency
+- bond_total
+- booking_age_category
+- booking_date
+- booking_date_iso
+- booking_number
+- booking_priority
+- charges
+- charges_summary
+- detail_fetched_at
+- detail_url
+- fetched_at
+- first_seen_at
+- is_recent_addition_24h
+- last_seen_at
+- name
+- new_since_last_scan
+- recency_bucket
+- recency_tag
+- release_date
+- release_date_iso
+- scraped_at
+- source
+
+# brazoria_inmates — one sample doc
+{
+  _id: ObjectId('68a7c79ee040b45d40e61ebe'),
+  booking_number: '424422',
+  arresting_agency: "Brazoria County Sheriff's Office BF--DRIVING W/LIC INV W/PREV CONV/SUSP/W/O FIN RES",
+  bond_total: null,
+  booking_date: '10/15/2024',
+  booking_date_iso: '2024-10-15',
+  charges: [
+    {
+      'warrant #': '',
+      charge: null,
+      'issuing auth': null,
+      'offense date': null,
+      'bond/type': null,
+      'fine/crt costs': null,
+      disposition: null
+    },
+    {
+      'warrant #': '262011 - 1',
+      charge: 'BF--DRIVING W/LIC INV W/PREV CONV/SUSP/W/O FIN RES',
+      'issuing auth': 'County Court at Law #1',
+      'offense date': '03/20/2024',
+      'bond/type': '3,000.00Surety Bond',
+      'fine/crt costs': '',
+      disposition: 'Credit Time Served'
+    }
+  ],
+  charges_summary: "Brazoria County Sheriff's Office",
+  detail_fetched_at: '2025-08-22T01:27:58.332626+00:00',
+  detail_url: 'https://pubweb.brazoriacountytx.gov/PublicAccess/JailingDetail.aspx?JailingID=393696',
+  fetched_at: '2025-08-22T13:31:44.271950+00:00',
+  first_seen_at: '2025-08-22T01:27:58.260235+00:00',
+  last_seen_at: '2025-08-22T01:27:58.690159+00:00',
+  name: 'Burkhalter, Jerry Dale',
+  recency_bucket: '181-365d',
+  release_date: '10/30/2024',
+  release_date_iso: '2024-10-30',
+  source: 'brazoria_inquiry',
+  new_since_last_scan: true,
+  is_recent_addition_24h: true,
+  recency_tag: '≤365d'
+}
+
+# fortbend_inmates — top-level fields (20)
+- _id
+- bond_total
+- booking_age_category
+- booking_date
+- booking_date_iso
+- booking_number
+- booking_priority
+- charges
+- detail_fetched_at
+- detail_url
+- dob
+- fetched_at
+- first_seen_at
+- id
+- inserted_at
+- is_recent_addition_24h
+- jail_id
+- name
+- scraped_at
+- source
+
+# fortbend_inmates — one sample doc
+{
+  _id: ObjectId('68a78edce040b45d40e618da'),
+  booking_number: '2505913',
+  id: 'P00223285',
+  bond_total: null,
+  booking_date: 'BLACK',
+  charges: [
+    {
+      agency: "FT. BEND COUNTY SHERIFF'S OFFICE",
+      authority: 'BWART',
+      'warrant number': '24-DCR-106737',
+      jus: 'DIST',
+      'charge description': 'WITNESS(ES)',
+      lvl: 'F*',
+      'bail type': '',
+      'bail amount': '$0.00',
+      fines: '$0.00',
+      disposition: '',
+      warrant_number: '24-DCR-106737',
+      charge_description: 'WITNESS(ES)',
+      bail_type: '',
+      bail_amount: '$0.00',
+      bail_amount_int: 0
+    },
+    {
+      agency: "FT. BEND COUNTY SHERIFF'S OFFICE",
+      authority: 'HOLDS',
+      'warrant number': '',
+      jus: 'STA',
+      'charge description': 'HOLD TDCJ (B/W)',
+      lvl: 'XX',
+      'bail type': '',
+      'bail amount': '$0.00',
+      fines: '$0.00',
+      disposition: '',
+      warrant_number: '',
+      charge_description: 'HOLD TDCJ (B/W)',
+      bail_type: '',
+      bail_amount: '$0.00',
+      bail_amount_int: 0
+    },
+    {
+      agency: "FT. BEND COUNTY SHERIFF'S OFFICE",
+      authority: 'WARR',
+      'warrant number': '21-JCR31-184153',
+      jus: 'JOP',
+      'charge description': 'EXPIRED REG OR NO REG STICKER',
+      lvl: 'MC',
+      'bail type': '',
+      'bail amount': '$0.00',
+      fines: '$230.00',
+      disposition: '07/31/2025',
+      warrant_number: '21-JCR31-184153',
+      charge_description: 'EXPIRED REG OR NO REG STICKER',
+      bail_type: '',
+      bail_amount: '$0.00',
+      bail_amount_int: 0
+    }
+  ],
+  detail_fetched_at: '2025-09-09T14:11:40.043011+00:00',
+  detail_url: 'https://jailinq.fortbendcountytx.gov/Inmate/View_Inmate?VarJailID=P00223285',
+  dob: null,
+  fetched_at: ISODate('2025-09-09T14:11:39.930Z'),
+  first_seen_at: '2025-08-21T21:34:39.160690+00:00',
+  inserted_at: '2025-08-21T21:25:47.860711+00:00',
+  jail_id: 'P00223285',
+  name: 'ABDI,ABDISA',
+  source: 'fortbend_inquiry',
+  booking_age_category: 'unknown',
+  booking_date_iso: null,
+  booking_priority: 7,
+  is_recent_addition_24h: false,
+  scraped_at: ISODate('2025-09-09T14:11:39.930Z')
+}
+
+# galveston_events — top-level fields (21)
+- _id
+- age
+- agency
+- arrest_date
+- bonds
+- booked_at
+- booking_age_category
+- booking_number
+- booking_priority
+- charges
+- county
+- facility
+- migrated_at
+- person_id
+- race
+- released_at
+- scraped_at
+- sex
+- source_url
+- status
+- total_bond
+
+# galveston_events — one sample doc
+{
+  _id: ObjectId('68a8879e0700b993e588b02f'),
+  person_id: '68a8879ee040b45d40e625bb',
+  county: 'Galveston',
+  facility: 'Galveston County Jail (P2C)',
+  booking_number: null,
+  status: 'In Custody',
+  booked_at: '2025-08-06',
+  released_at: null,
+  source_url: 'https://p2c.galvestoncountytx.gov/InmateDetail.aspx?navid=638914539824849698',
+  scraped_at: '2025-08-22T15:07:10.330512Z',
+  charges: [
+    {
+      charge: 'EVADING ARREST DET W/VEH',
+      status: 'DEFERRED PROBATION',
+      docket: '20CR3694',
+      bond: 'OTHER $0.00'
+    }
+  ],
+  bonds: [],
+  total_bond: 'N/A',
+  agency: '',
+  arrest_date: '8/6/2025',
+  race: 'BLACK',
+  sex: 'MALE',
+  age: '24 YEARS OLD',
+  booking_age_category: '0_to_30_days',
+  booking_priority: 2,
+  migrated_at: '2025-08-25T18:31:07.525890Z'
+}
+
+# jefferson_events — top-level fields (23)
+- _id
+- age
+- agency
+- arrest_date
+- bonds
+- booked_at
+- booking_age_category
+- booking_number
+- booking_priority
+- charges
+- county
+- facility
+- first_name
+- full_name
+- last_name
+- person_id
+- race
+- released_at
+- scraped_at
+- sex
+- source_url
+- status
+- total_bond
+
+# jefferson_events — one sample doc
+{
+  _id: ObjectId('68ac9f99cdfd95f7e9d54e3c'),
+  person_id: null,
+  county: 'Jefferson',
+  facility: 'Jefferson County Jail',
+  full_name: 'JOHN DAVID ALLEN',
+  first_name: 'JOHN DAVID',
+  last_name: 'ALLEN',
+  booking_number: null,
+  status: 'In Custody',
+  booked_at: '2022-12-08',
+  booking_age_category: '365_days_or_older',
+  booking_priority: 6,
+  released_at: null,
+  source_url: 'https://jeffersoncountytx.gov/InmateSearch/Search/Detail/734718',
+  scraped_at: '2025-08-25T17:38:33.524087Z',
+  charges: [
+    {
+      charge: 'SEXUAL ASSLT CHILD',
+      status: 'F2',
+      docket: '23DCCR0420 - 1',
+      bond: '$100,000.00',
+      condition: ''
+    },
+    {
+      charge: 'SEXUAL ASSLT CHILD',
+      status: 'F2',
+      docket: '23DCCR0421 - 1',
+      bond: '$100,000.00',
+      condition: ''
+    }
+  ],
+  bonds: [],
+  total_bond: 200000,
+  agency: "Jefferson County Sheriff's Office",
+  arrest_date: '2022-12-08',
+  race: 'White',
+  sex: 'Male',
+  age: '44'
+}
+
+# harris_bond — top-level fields (28)
+- _id
+- address
+- bond_amount
+- bond_note
+- booking_age_category
+- booking_priority
+- case_number
+- court_group
+- court_no
+- file_date
+- first_middle
+- first_seen_at
+- first_seen_file_date
+- group
+- history
+- last_name
+- last_seen_file_date
+- name
+- needs_bond_help
+- offense
+- race_code
+- scraped_at
+- sex_code
+- source
+- source_filename_date
+- source_url
+- spn
+- updated_at
+
+# harris_bond — one sample doc
+{
+  _id: ObjectId('68a7613de040b45d40e6158a'),
+  group: 'Civil',
+  case_number: '257841801010',
+  spn: '03283596',
+  address: {
+    line1: '8712 OLD MANOR RD 1109',
+    city: 'AUSTIN',
+    zip: '78724;'
+  },
+  bond_amount: 1500,
+  bond_note: '',
+  court_group: '002',
+  court_no: '004',
+  file_date: '2025-08-22',
+  first_middle: 'FELIX JUAN',
+  first_seen_at: '2025-08-21T18:11:06.508090',
+  first_seen_file_date: '2025-08-21',
+  history: [
+    {
+      ts: '2025-08-21T18:11:06.508090',
+      bond_amount: 1500,
+      bond_note: '',
+      file_date: '2025-08-21',
+      source: 'harris_civil_bond'
+    },
+    {
+      ts: '2025-08-21T18:20:42.037928+00:00',
+      bond_amount: 1500,
+      bond_note: '',
+      file_date: '2025-08-21',
+      source: 'harris_civil_bond'
+    },
+    {
+      ts: '2025-08-22T18:27:00.281014+00:00',
+      bond_amount: 1500,
+      bond_note: '',
+      file_date: '2025-08-22',
+      source: 'harris_civil_bond'
+    }
+  ],
+  last_name: 'HERNANDEZ',
+  last_seen_file_date: '2025-08-22',
+  name: 'HERNANDEZ, FELIX JUAN',
+  needs_bond_help: true,
+  offense: 'FAIL TO ID GIVE FALSE/FI',
+  race_code: 'A',
+  sex_code: 'B',
+  source: 'harris_civil_bond',
+  source_filename_date: '08-17-25',
+  source_url: 'Civil/08-17-25-bond.txt',
+  updated_at: '2025-08-22T18:27:00.281014+00:00'
+}
+
+# harris_misfel — top-level fields (25)
+- _id
+- address
+- bond_amount
+- bond_note
+- booking_age_category
+- booking_priority
+- case_date
+- case_number
+- court_group
+- dob
+- file_date
+- first_seen_at
+- first_seen_file_date
+- group
+- history
+- last_seen_file_date
+- name
+- needs_bond_help
+- offense
+- scraped_at
+- source
+- source_filename_date
+- source_url
+- spn
+- updated_at
+
+# harris_misfel — one sample doc
+{
+  _id: ObjectId('68a7613ee040b45d40e61770'),
+  group: 'Civil',
+  spn: '111092',
+  case_number: '002',
+  address: {
+    line1: 'DISCHARGE FIREARM METRO AREA 8849 BRAESMONT DR.',
+    city: '229',
+    state: 'HOUSTON',
+    zip: 'TX',
+    phone: '77081'
+  },
+  bond_amount: 2948058,
+  bond_note: '00002002',
+  case_date: null,
+  court_group: '081325',
+  dob: null,
+  file_date: '2025-08-22',
+  first_seen_at: '2025-08-21T18:11:09.421365',
+  first_seen_file_date: '2025-08-21',
+  history: [
+    {
+      ts: '2025-08-21T18:11:09.421365',
+      bond_amount: 2948058,
+      bond_note: '00002002',
+      file_date: '2025-08-21',
+      source: 'harris_civil_misfel'
+    },
+    {
+      ts: '2025-08-21T18:20:45.281259+00:00',
+      bond_amount: 2948058,
+      bond_note: '00002002',
+      file_date: '2025-08-21',
+      source: 'harris_civil_misfel'
+    },
+    {
+      ts: '2025-08-22T18:27:03.374126+00:00',
+      bond_amount: 2948058,
+      bond_note: '00002002',
+      file_date: '2025-08-22',
+      source: 'harris_civil_misfel'
+    }
+  ],
+  last_seen_file_date: '2025-08-22',
+  name: 'VARGAS',
+  needs_bond_help: true,
+  offense: '240792301010',
+  source: 'harris_civil_misfel',
+  source_filename_date: '08-17-25',
+  source_url: 'Civil/08-17-25-misfel.txt',
+  updated_at: '2025-08-22T18:27:03.374126+00:00'
+}
+
+# harris_nafiling — top-level fields (28)
+- _id
+- address
+- aux_flag
+- bond_amount
+- bond_note
+- booking_age_category
+- booking_priority
+- case_number
+- court_group
+- court_no
+- file_date
+- filing_flag
+- first_middle
+- first_seen_at
+- first_seen_file_date
+- group
+- history
+- last_name
+- last_seen_file_date
+- name
+- needs_bond_help
+- offense
+- scraped_at
+- source
+- source_filename_date
+- source_url
+- spn
+- updated_at
+
+# harris_nafiling — one sample doc
+{
+  _id: ObjectId('68a7613fe040b45d40e617cc'),
+  group: 'Civil',
+  spn: '02186118',
+  case_number: '257624301010',
+  address: {
+    line1: '19863 LAUREL TRAIL DRIVE CYPRESS',
+    city: '77433;',
+    zip: null
+  },
+  aux_flag: 'N',
+  bond_amount: 100,
+  bond_note: 'UNSECURED GOB ELIGIBLE',
+  court_group: '002',
+  court_no: '001',
+  file_date: '2025-08-22',
+  filing_flag: 'I',
+  first_middle: 'FERNANDO',
+  first_seen_at: '2025-08-21T18:11:11.051602',
+  first_seen_file_date: '2025-08-21',
+  history: [
+    {
+      ts: '2025-08-21T18:11:11.051602',
+      bond_amount: 100,
+      bond_note: 'UNSECURED GOB ELIGIBLE',
+      file_date: '2025-08-21',
+      source: 'harris_civil_nafiling'
+    },
+    {
+      ts: '2025-08-21T18:20:47.683647+00:00',
+      bond_amount: 100,
+      bond_note: 'UNSECURED GOB ELIGIBLE',
+      file_date: '2025-08-21',
+      source: 'harris_civil_nafiling'
+    },
+    {
+      ts: '2025-08-22T18:27:06.207180+00:00',
+      bond_amount: 100,
+      bond_note: 'UNSECURED GOB ELIGIBLE',
+      file_date: '2025-08-22',
+      source: 'harris_civil_nafiling'
+    }
+  ],
+  last_name: 'ZARATE',
+  last_seen_file_date: '2025-08-22',
+  name: 'ZARATE, FERNANDO',
+  needs_bond_help: false,
+  offense: 'FAIL COMPLY W/DUTY STRIK',
+  source: 'harris_civil_nafiling',
+  source_filename_date: '08-17-25',
+  source_url: 'Civil/08-17-25-nafiling.txt',
+  updated_at: '2025-08-22T18:27:06.207180+00:00'
+}
+
+# brazoria_inmates.charges — fields (7)
+- bond/type
+- charge
+- disposition
+- fine/crt costs
+- issuing auth
+- offense date
+- warrant #
+
+# fortbend_inmates.charges — fields (15)
+- agency
+- authority
+- bail amount
+- bail type
+- bail_amount
+- bail_amount_int
+- bail_type
+- charge description
+- charge_description
+- disposition
+- fines
+- jus
+- lvl
+- warrant number
+- warrant_number
+
+# galveston_events.charges — fields (4)
+- bond
+- charge
+- docket
+- status
+
+# galveston_events.events — fields (0)
+
+# jefferson_events.charges — fields (5)
+- bond
+- charge
+- condition
+- docket
+- status
+
+# jefferson_events.events — fields (0)
+
+# Document counts
+brazoria_inmates 3140
+fortbend_inmates 854
+galveston_events 2345
+jefferson_events 737
+harris_bond 2054
+harris_misfel 812
+harris_nafiling 204
+
+# Done.
