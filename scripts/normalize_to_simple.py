@@ -22,6 +22,9 @@ COUNTY_ALL = ["harris", "brazoria", "galveston", "fortbend", "jefferson"]
 PROGRESS_EVERY = int(os.getenv("NORMALIZE_PROGRESS_EVERY", "1000"))  # print every N docs
 CHUNK_SIZE     = int(os.getenv("NORMALIZE_CHUNK_SIZE", "5000"))      # stream chunk size
 
+# Normalize semantics
+ZERO_BOND_AS_NULL = os.getenv("NORMALIZE_ZERO_BOND_AS_NULL", "0") == "1"
+
 # How often to print a normalized sample (0 = disabled)
 SAMPLE_EVERY   = int(os.getenv("NORMALIZE_SAMPLE_EVERY", "500"))
 
@@ -33,6 +36,7 @@ def _format_sample(d: Dict[str, Any]) -> str:
         "dob", "booking_date",
         "offense", "bond", "bond_amount",
         "booking_number", "case_number", "spn",
+        "agency", "facility",
         "source", "time_bucket"
     ]
     # Build a stable, short line
@@ -149,7 +153,7 @@ def extract_charge_bonds(charges, bonds=None) -> List[Dict[str, Any]]:
             desc = ch.get("charge") or ch.get("description") or ch.get("offense") or ch.get("desc")
             # Various possible numeric fields
             amt = None
-            for k in ("bond_amount", "bond_total", "amount", "bond"):
+            for k in ("bond_amount", "bond_total", "amount", "bond", "bond/type", "fine/crt costs"):
                 if k in ch and ch.get(k) not in (None, "", []):
                     amt = to_money(ch.get(k))
                     if amt is not None:
@@ -183,10 +187,62 @@ def to_money(x: Any) -> Optional[float]:
     m = re.search(r"([0-9]+(?:\.[0-9]{1,2})?)", s)
     return float(m.group(1)) if m else None
 
+# --- Agency cleaning for Brazoria (and similar) ---
+AGENCY_SUFFIXES = [
+    " POLICE DEPARTMENT",
+    " POLICE DEPT",
+    " SHERIFF'S OFFICE",
+    " SHERIFFS OFFICE",
+    " SHERIFF OFFICE",
+    " CONSTABLE",
+    " DEPARTMENT OF PUBLIC SAFETY",
+    " DPS",
+]
+
+def clean_agency(name: Optional[str]) -> Optional[str]:
+    if not name or not isinstance(name, str):
+        return None
+    s = name.strip()
+    # If there's a long uppercase tail (likely offense text), try to truncate at known agency suffixes.
+    up = s.upper()
+    best = None
+    for suf in AGENCY_SUFFIXES:
+        idx = up.find(suf)
+        if idx != -1:
+            j = idx + len(suf)
+            # keep the shortest reasonable cutoff beyond which text is usually charges
+            cand = s[:j]
+            if not best or len(cand) > len(best):
+                best = cand
+    # Fallback: if string contains two or more consecutive spaces, take the first token chunk
+    if not best and "  " in s:
+        best = s.split("  ", 1)[0].strip()
+    # Final sanity: if best is too short, ignore
+    if best and len(best) >= 6:
+        return best
+    return s
+
+# --- Agency detector helper ---
+AGENCY_KEYWORDS = [
+    "POLICE", "SHERIFF", "CONSTABLE", "DEPARTMENT", "DPS", "CITY OF", "PD"
+]
+
+def is_agency_like(s: Optional[str]) -> bool:
+    if not s or not isinstance(s, str):
+        return False
+    up = s.upper()
+    return any(k in up for k in AGENCY_KEYWORDS)
+
 def pick(*vals):
     for v in vals:
         if v not in (None, "", []): return v
     return None
+
+# Normalize bond amount according to config
+def normalize_bond_amount(val: Optional[float]) -> Optional[float]:
+    if ZERO_BOND_AS_NULL and isinstance(val, (int, float)) and float(val) == 0.0:
+        return None
+    return val
 
 def build_norm_doc(
     county: str,
@@ -204,6 +260,10 @@ def build_norm_doc(
     source_id: Any,
     extra: Dict[str, Any],
     charge_bonds: Optional[List[Dict[str, Any]]] = None,
+    agency: Optional[str] = None,
+    facility: Optional[str] = None,
+    race: Optional[str] = None,
+    sex: Optional[str] = None,
 ) -> Dict[str, Any]:
     first, last = split_name(full_name)
     now_iso = dt.datetime.now(dt.timezone.utc).isoformat()
@@ -232,6 +292,10 @@ def build_norm_doc(
         "booking_number": booking_number,
         "case_number": case_number,
         "spn": spn,
+        "agency": agency,
+        "facility": facility,
+        "race": race,
+        "sex": sex,
         "source": source,               # original collection/source
         "source_id": str(source_id) if isinstance(source_id, ObjectId) else source_id,
         "extra": extra,                 # preserve everything else
@@ -269,7 +333,36 @@ def norm_harris(doc: Dict[str, Any]) -> Dict[str, Any]:
     booking_date = pick(doc.get("case_date"), doc.get("file_date"))
     offense = pick(doc.get("offense"))
     bond_amount = to_money(doc.get("bond_amount"))
+    # If main field missing, some rows encode amounts in bond_note like "00000100"
+    if bond_amount is None:
+        alt_from_note = to_money(doc.get("bond_note"))
+        if alt_from_note is not None:
+            bond_amount = alt_from_note
     bond_note = pick(doc.get("bond_note"))
+    src = (doc.get("source") or "").lower()
+    # Misfel files are known to have inflated/scaled bond_amount values; avoid passing bad numbers downstream
+    if "misfel" in src and isinstance(bond_amount, (int, float)) and bond_amount >= 500_000:
+        # Keep the upstream value in extra (already preserved), but do not emit it as normalized bond_amount
+        bond_amount = None
+    # Map demographic codes when available
+    race_map = {
+        "A": "Asian",
+        "B": "Black",
+        "W": "White",
+        "I": "Indigenous",
+        "O": "Other",
+        "U": "Unknown",
+        "X": "Unknown",
+    }
+    sex_map = {
+        "M": "Male",
+        "J": "Male",   # some Harris feeds use J for Male
+        "F": "Female",
+        "X": "Unknown",
+        "U": "Unknown",
+    }
+    race = race_map.get(str(doc.get("race_code") or "").strip().upper())
+    sex  = sex_map.get(str(doc.get("sex_code")  or "").strip().upper())
     booking_number = None
     case_number = pick(doc.get("case_number"))
     spn = pick(doc.get("spn"))
@@ -282,10 +375,14 @@ def norm_harris(doc: Dict[str, Any]) -> Dict[str, Any]:
         booking_date=parse_date_maybe(booking_date),
         offense=offense,
         bond=bond_note,
-        bond_amount=bond_amount,
+        bond_amount=normalize_bond_amount(bond_amount),
         booking_number=booking_number,
         case_number=case_number,
         spn=spn,
+        agency=None,
+        facility=None,
+        race=race,
+        sex=sex,
         source=doc.get("source","harris"),
         source_id=doc.get("_id"),
         extra={k:v for k,v in doc.items() if k not in {"_id"}},
@@ -296,16 +393,43 @@ def norm_brazoria(doc: Dict[str, Any]) -> Dict[str, Any]:
     full_name = (doc.get("name") or doc.get("full_name") or "").upper() or None
     dob = None
     booking_date = pick(doc.get("booking_date_iso"), doc.get("booking_date"))
+    # offense: pick first non-null charge from charges list
     offense = None
-    if isinstance(doc.get("charges"), list) and doc["charges"]:
-        offense = doc["charges"][1].get("charge") if len(doc["charges"])>1 else doc["charges"][0].get("charge")
+    ch = doc.get("charges")
+    if isinstance(ch, list):
+        for item in ch:
+            if isinstance(item, dict) and item.get("charge"):
+                offense = item.get("charge"); break
     offense = offense or doc.get("charges_summary")
     bond_amount = to_money(doc.get("bond_total"))
+    if bond_amount is None:
+        # try summing from per-charge fields (bond/type, fine/crt costs, etc.)
+        parts = extract_charge_bonds(doc.get("charges"))
+        vals = [p.get("amount") for p in parts if p.get("amount") is not None]
+        bond_amount = sum(vals) if vals else None
+    bond_amount = normalize_bond_amount(bond_amount)
     booking_number = pick(doc.get("booking_number"))
     case_number = None
     spn = None
     category = "Criminal"  # jail feed
+    # Heuristic facility label when coming from Brazoria jail site
+    facility = None
+    try:
+        url = doc.get("detail_url") or ""
+        if isinstance(url, str) and "brazoriacountytx.gov" in url.lower():
+            facility = "Brazoria County Jail"
+    except Exception:
+        pass
     cb = extract_charge_bonds(doc.get("charges"))
+    # Prefer a cleaned arresting_agency only if it looks like an agency; otherwise, use charges_summary if it looks like an agency
+    raw_agency = clean_agency(doc.get("arresting_agency"))
+    cs = doc.get("charges_summary")
+    if is_agency_like(raw_agency):
+        agency_val = raw_agency
+    elif is_agency_like(cs):
+        agency_val = cs
+    else:
+        agency_val = None
     return build_norm_doc(
         county="brazoria",
         category=category,
@@ -318,6 +442,10 @@ def norm_brazoria(doc: Dict[str, Any]) -> Dict[str, Any]:
         booking_number=booking_number,
         case_number=case_number,
         spn=spn,
+        agency=agency_val,
+        facility=facility,
+        race=None,
+        sex=None,
         source="brazoria_inmates",
         source_id=doc.get("_id"),
         extra={k:v for k,v in doc.items() if k not in {"_id"}},
@@ -329,26 +457,41 @@ def norm_galveston(person: Dict[str, Any], event: Optional[Dict[str, Any]]) -> D
                      (person.get("name") if isinstance(person.get("name"), str) else None))
     dob = person.get("dob")
     arrest_date = (event or {}).get("arrest_date")
-    total_bond = (event or {}).get("total_bond")
-    charges = (event or {}).get("charges") or []
+    booked_at   = (event or {}).get("booked_at")
+    total_bond  = (event or {}).get("total_bond")
+    charges     = (event or {}).get("charges") or []
     offense = None
     if isinstance(charges, list) and charges:
-        offense = charges[0].get("charge")
+        for ch in charges:
+            if isinstance(ch, dict) and ch.get("charge"):
+                offense = ch.get("charge"); break
     booking_number = (event or {}).get("booking_number")
     cb = extract_charge_bonds((event or {}).get("charges"), (event or {}).get("bonds"))
+    # Robust bond_amount: prefer total_bond; if empty/unparsable, sum per-charge amounts
+    bond_amount_val = to_money(total_bond)
+    if bond_amount_val is None:
+        parts = [p.get("amount") for p in cb if p.get("amount") is not None]
+        if parts:
+            bond_amount_val = sum(parts)
+    bond_amount_val = normalize_bond_amount(bond_amount_val)
+
     return build_norm_doc(
         county="galveston",
         category="Criminal",
         full_name=full_name,
         dob=parse_date_maybe(dob),
-        booking_date=parse_date_maybe(arrest_date),
+        booking_date=parse_date_maybe(pick(booked_at, arrest_date)),
         offense=offense,
         bond=None,
-        bond_amount=to_money(total_bond),
+        bond_amount=bond_amount_val,
         booking_number=booking_number,
         case_number=None,
         spn=None,
-        source="galveston_p2c",
+        agency=(event or {}).get("agency"),
+        facility=(event or {}).get("facility"),
+        race=(event or {}).get("race"),
+        sex=(event or {}).get("sex"),
+        source="galveston_events",
         source_id=person.get("_id") or (event or {}).get("_id"),
         extra={"person": {k:v for k,v in person.items() if k!="_id"},
                "event":  {k:v for k,v in (event or {}).items() if k!="_id"}},
@@ -359,9 +502,21 @@ def norm_fortbend(doc: Dict[str, Any]) -> Dict[str, Any]:
     full_name = (doc.get("name") or doc.get("full_name") or "").upper() or None
     dob = parse_date_maybe(doc.get("dob"))
     booking_date = parse_date_maybe(pick(doc.get("booking_date_iso"), doc.get("booking_date")))
-    offense = pick((doc.get("charges") or [{}])[0].get("charge") if isinstance(doc.get("charges"), list) else None,
-                   doc.get("charge_summary"))
+    offense = None
+    ch = doc.get("charges")
+    if isinstance(ch, list):
+        for item in ch:
+            if isinstance(item, dict) and (item.get("charge") or item.get("charge description")):
+                offense = item.get("charge") or item.get("charge description")
+                break
+    offense = offense or doc.get("charge_summary")
     bond_amount = to_money(doc.get("bond_total"))
+    if bond_amount is None:
+        # Fallback: sum per-charge amounts if present
+        parts = extract_charge_bonds(doc.get("charges"))
+        vals = [p.get("amount") for p in parts if p.get("amount") is not None]
+        bond_amount = sum(vals) if vals else None
+    bond_amount = normalize_bond_amount(bond_amount)
     booking_number = doc.get("booking_number")
     cb = extract_charge_bonds(doc.get("charges"))
     return build_norm_doc(
@@ -376,6 +531,10 @@ def norm_fortbend(doc: Dict[str, Any]) -> Dict[str, Any]:
         booking_number=booking_number,
         case_number=None,
         spn=None,
+        agency=None,
+        facility=None,
+        race=None,
+        sex=None,
         source="fortbend_jail",
         source_id=doc.get("_id"),
         extra={k:v for k,v in doc.items() if k not in {"_id"}},
@@ -394,6 +553,7 @@ def norm_jefferson(doc: Dict[str, Any]) -> Dict[str, Any]:
         offense = ch[0].get("charge") or ch[0].get("description")
     offense = pick(offense, doc.get("charge_summary"), doc.get("offense"))
     bond_amount = to_money(pick(doc.get("bond_total"), doc.get("total_bond"), doc.get("bond_amount"), doc.get("bond")))
+    bond_amount = normalize_bond_amount(bond_amount)
     booking_number = pick(doc.get("booking_number"), doc.get("bookingNo"))
     cb = extract_charge_bonds(doc.get("charges"))
     return build_norm_doc(
@@ -408,6 +568,10 @@ def norm_jefferson(doc: Dict[str, Any]) -> Dict[str, Any]:
         booking_number=booking_number,
         case_number=None,
         spn=None,
+        agency=doc.get("agency"),
+        facility=doc.get("facility"),
+        race=doc.get("race"),
+        sex=doc.get("sex"),
         source=doc.get("source", "jefferson_jail"),
         source_id=doc.get("_id"),
         extra={k: v for k, v in doc.items() if k != "_id"},
@@ -422,14 +586,29 @@ def _count_coll(db, name: str) -> int:
         return 0
 
 def iter_harris(db) -> Iterable[Dict[str, Any]]:
-    names = ("harris_bond", "harris_misfel", "harris_nafiling")
-    for name in names:
+    """Yield normalized Harris docs from bond + nafiling only; MISFEL is explicitly skipped."""
+    configured = ("harris_bond", "harris_nafiling")
+    L.info(f"Harris: configured sources = {configured}; MISFEL is skipped")
+
+    # Always guard against MISFEL even if another code path attempts to include it
+    candidates = ("harris_bond", "harris_nafiling", "harris_misfel")
+    for name in candidates:
+        if name == "harris_misfel":
+            if name in db.list_collection_names():
+                L.info("Harris: skipping harris_misfel (redundant/low-quality bond values)")
+            continue
         if name in db.list_collection_names():
             approx = _count_coll(db, name)
             L.info(f"Harris: scanning {name} (~{approx} docs) in chunks of {CHUNK_SIZE}")
             i = 0
             for d in stream_collection(db[name]):
                 i += 1
+                # Guard: never emit MISFEL docs even if they appear in a configured source by mistake
+                src_val = (d.get("source") or "").lower()
+                if "misfel" in src_val:
+                    if i % PROGRESS_EVERY == 0:
+                        L.info(f"Harris: skipped MISFEL doc injected into {name}…")
+                    continue
                 if i % PROGRESS_EVERY == 0:
                     L.info(f"Harris: processed {i} {name} docs…")
                 yield norm_harris(d)
@@ -450,35 +629,53 @@ def iter_brazoria(db) -> Iterable[Dict[str, Any]]:
 
 def iter_galveston(db) -> Iterable[Dict[str, Any]]:
     persons_name = "persons"
-    ev_name = "custody_events"
+    ev_candidates = ["galveston_events", "custody_events"]
+    ev_name = next((n for n in ev_candidates if n in db.list_collection_names()), None)
 
     if persons_name not in db.list_collection_names():
         L.info("Galveston: persons collection missing; nothing to do.")
         return
 
     # Build latest custody event per person (if the collection exists)
-    latest = {}
-    if ev_name in db.list_collection_names():
-        L.info("Galveston: indexing latest custody_events by person_id (chunked)…")
+    latest_by_pid = {}
+    latest_by_url = {}
+    if ev_name:
+        L.info(f"Galveston: indexing latest {ev_name} by person_id (chunked)…")
         ev_fields = {
             "person_id": 1, "scraped_at": 1,
             "booking_number": 1, "status": 1, "booked_at": 1, "released_at": 1,
             "source_url": 1, "charges": 1, "bonds": 1, "total_bond": 1,
             "agency": 1, "arrest_date": 1, "race": 1, "sex": 1, "age": 1,
+            "facility": 1,
         }
         ev_count = 0
-        for ev in stream_collection(db[ev_name], {"county": "Galveston"}, projection=ev_fields):
+        for ev in stream_collection(db[ev_name], projection=ev_fields):
             ev_count += 1
             pid = ev.get("person_id")
-            if not pid:
-                continue
-            prev = latest.get(pid)
-            cur_ts = ev.get("scraped_at","")
-            if not prev or cur_ts > prev.get("scraped_at",""):
-                latest[pid] = ev
-        L.info(f"Galveston: events indexed = {ev_count}; persons with events = {len(latest)}")
+            # Normalize person_id type: events store person_id as a hex string, while persons._id is an ObjectId
+            if isinstance(pid, str):
+                try:
+                    pid = ObjectId(pid)
+                except Exception:
+                    # leave as-is if not a valid ObjectId hex string
+                    pass
+            if pid:
+                prev = latest_by_pid.get(pid)
+                cur_ts = (ev.get("scraped_at") or "")
+                prev_ts = (prev.get("scraped_at") if prev else "")
+                if not prev or str(cur_ts) > str(prev_ts):
+                    latest_by_pid[pid] = ev
+            # Index by source_url (newest-wins)
+            url = ev.get("source_url")
+            if url:
+                prev_url_ev = latest_by_url.get(url)
+                cur_ts2 = (ev.get("scraped_at") or "")
+                prev_ts2 = (prev_url_ev.get("scraped_at") if prev_url_ev else "")
+                if not prev_url_ev or str(cur_ts2) > str(prev_ts2):
+                    latest_by_url[url] = ev
+        L.info(f"Galveston: events indexed = {ev_count}; persons with events (by_id) = {len(latest_by_pid)}; by_url = {len(latest_by_url)}")
     else:
-        L.info("Galveston: custody_events missing; will normalize from persons only.")
+        L.info("Galveston: custody_events/galveston_events missing; will normalize from persons only.")
 
     # Stream persons with p2c links
     L.info("Galveston: streaming persons with p2c links (chunked)…")
@@ -487,7 +684,17 @@ def iter_galveston(db) -> Iterable[Dict[str, Any]]:
         i += 1
         if i % PROGRESS_EVERY == 0:
             L.info(f"Galveston: processed {i} persons…")
-        ev = latest.get(p["_id"]) if latest else None
+        ev = None
+        if latest_by_pid:
+            ev = latest_by_pid.get(p["_id"]) or ev
+        if not ev and latest_by_url:
+            # find the person's P2C link and join by URL
+            links = p.get("links") or []
+            for link in links:
+                if isinstance(link, dict) and link.get("rel") == "p2c_detail" and link.get("url"):
+                    ev = latest_by_url.get(link["url"]) or ev
+                    if ev:
+                        break
         yield norm_galveston(p, ev)
     L.info(f"Galveston: finished persons (processed {i})")
 
