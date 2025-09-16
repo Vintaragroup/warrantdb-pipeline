@@ -68,12 +68,23 @@ L = Logger()
 DATE_PATTERNS = [
     "%Y-%m-%d",
     "%m/%d/%Y", "%m/%d/%y",
-    "%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%SZ",
+    "%m-%d-%Y", "%m-%d-%y",
+    "%Y/%m/%d",
+    "%Y-%m-%dT%H:%M:%S.%fZ",
+    "%Y-%m-%dT%H:%M:%S%z",
+    "%Y-%m-%dT%H:%M:%SZ",
 ]
 
 def parse_date_maybe(s: Optional[str]) -> Optional[str]:
     if not s or not isinstance(s, str): return None
     s = s.strip()
+    # support 8-digit MMDDYYYY
+    if re.fullmatch(r"\d{8}", s):
+        mm, dd, yyyy = s[:2], s[2:4], s[4:]
+        try:
+            return dt.date(int(yyyy), int(mm), int(dd)).isoformat()
+        except Exception:
+            pass
     # quick yymmdd or mmddyy helpers
     if re.fullmatch(r"\d{6}", s):
         mm, dd, yy = s[:2], s[2:4], s[4:]
@@ -107,6 +118,7 @@ def compute_time_bucket(booking_date_iso: Optional[str]) -> Optional[str]:
       - 60_to_180_days
       - 180_to_365_days
       - 365_days_or_older
+    # Note: sub-day recency is approximated by calendar-day deltas (0=today, 1=yesterday, etc.)
     """
     if not booking_date_iso:
         return None
@@ -153,12 +165,18 @@ def extract_charge_bonds(charges, bonds=None) -> List[Dict[str, Any]]:
             desc = ch.get("charge") or ch.get("description") or ch.get("offense") or ch.get("desc")
             # Various possible numeric fields
             amt = None
-            for k in ("bond_amount", "bond_total", "amount", "bond", "bond/type", "fine/crt costs"):
+            for k in (
+                "bond_amount", "bond total", "bond_total",
+                "amount", "bail amount", "bail_amount",
+                "bond amount",
+                "bond", "bond/type",
+                "fine/crt costs"
+            ):
                 if k in ch and ch.get(k) not in (None, "", []):
                     amt = to_money(ch.get(k))
                     if amt is not None:
                         break
-            note = ch.get("bond_note") or ch.get("bond") if isinstance(ch.get("bond"), str) else None
+            note = ch.get("bond_note") or (ch.get("bond") if isinstance(ch.get("bond"), str) else None)
             out.append({"charge": desc, "bond": note, "amount": amt})
     # Some sources keep a parallel 'bonds' list with descriptions & amounts
     if isinstance(bonds, list):
@@ -181,9 +199,17 @@ def split_name(full: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
     return f, None
 
 def to_money(x: Any) -> Optional[float]:
-    if x is None: return None
-    if isinstance(x, (int, float)): return float(x)
-    s = str(x).replace(",", "")
+    if x is None:
+        return None
+    if isinstance(x, (int, float)):
+        return float(x)
+    s = str(x).strip()
+    # Common non-numeric tokens
+    if s == "" or s.upper() in {"NO BOND", "NOBOND", "N/A", "NA", "NONE"}:
+        return None
+    # Remove currency symbols and thousand separators
+    s = s.replace("$", "").replace(",", "")
+    # Take the first number if a range or note like "5000.00 CASH/SURETY"
     m = re.search(r"([0-9]+(?:\.[0-9]{1,2})?)", s)
     return float(m.group(1)) if m else None
 
@@ -243,6 +269,27 @@ def normalize_bond_amount(val: Optional[float]) -> Optional[float]:
     if ZERO_BOND_AS_NULL and isinstance(val, (int, float)) and float(val) == 0.0:
         return None
     return val
+
+# ---------- Quality Audit (optional) ----------
+NORMALIZE_AUDIT = os.getenv("NORMALIZE_AUDIT", "0") == "1"
+AUDIT_COLLECTION = os.getenv("NORMALIZE_AUDIT_COLLECTION", "scrape_audit")
+REQUIRED_MIN_FIELDS = ("full_name", "booking_date",)  # minimally required for reliable downstream
+IMPORTANT_FIELDS = ("offense", "bond_amount")
+
+def audit_summary(doc: Dict[str, Any]) -> Dict[str, Any]:
+    missing = [k for k in REQUIRED_MIN_FIELDS if not doc.get(k)]
+    weak = [k for k in IMPORTANT_FIELDS if not doc.get(k)]
+    return {
+        "county": doc.get("county"),
+        "source": doc.get("source"),
+        "source_id": doc.get("source_id"),
+        "missing": missing,
+        "weak": weak,
+        "booking_date": doc.get("booking_date"),
+        "bond_amount": doc.get("bond_amount"),
+        "offense": doc.get("offense"),
+        "normalized_at": doc.get("normalized_at"),
+    }
 
 def build_norm_doc(
     county: str,
@@ -367,6 +414,16 @@ def norm_harris(doc: Dict[str, Any]) -> Dict[str, Any]:
     case_number = pick(doc.get("case_number"))
     spn = pick(doc.get("spn"))
     cb = extract_charge_bonds(doc.get("charges"))
+
+    # Fallback: some rows carry latest bond in a 'history' list
+    if bond_amount is None and isinstance(doc.get("history"), list):
+        for h in doc.get("history"):
+            if isinstance(h, dict):
+                cand = to_money(h.get("bond_amount") or h.get("bond"))
+                if cand is not None:
+                    bond_amount = cand
+                    break
+
     return build_norm_doc(
         county="harris",
         category=category,
@@ -393,14 +450,21 @@ def norm_brazoria(doc: Dict[str, Any]) -> Dict[str, Any]:
     full_name = (doc.get("name") or doc.get("full_name") or "").upper() or None
     dob = None
     booking_date = pick(doc.get("booking_date_iso"), doc.get("booking_date"))
-    # offense: pick first non-null charge from charges list
+    # offense: pick first non-null charge from charges list, or charges_summary if not agency-like
     offense = None
+    # Prefer explicit charge on first structured item
     ch = doc.get("charges")
     if isinstance(ch, list):
         for item in ch:
-            if isinstance(item, dict) and item.get("charge"):
-                offense = item.get("charge"); break
-    offense = offense or doc.get("charges_summary")
+            if isinstance(item, dict) and (item.get("charge") or item.get("description") or item.get("offense")):
+                offense = item.get("charge") or item.get("description") or item.get("offense")
+                break
+    # Fall back to charges_summary if it looks like a charge string (not an agency)
+    if not offense:
+        cs = doc.get("charges_summary")
+        if isinstance(cs, str) and not is_agency_like(cs):
+            offense = cs
+
     bond_amount = to_money(doc.get("bond_total"))
     if bond_amount is None:
         # try summing from per-charge fields (bond/type, fine/crt costs, etc.)
@@ -408,8 +472,9 @@ def norm_brazoria(doc: Dict[str, Any]) -> Dict[str, Any]:
         vals = [p.get("amount") for p in parts if p.get("amount") is not None]
         bond_amount = sum(vals) if vals else None
     bond_amount = normalize_bond_amount(bond_amount)
+
     booking_number = pick(doc.get("booking_number"))
-    case_number = None
+    case_number = doc.get("case_number")
     spn = None
     category = "Criminal"  # jail feed
     # Heuristic facility label when coming from Brazoria jail site
@@ -423,11 +488,11 @@ def norm_brazoria(doc: Dict[str, Any]) -> Dict[str, Any]:
     cb = extract_charge_bonds(doc.get("charges"))
     # Prefer a cleaned arresting_agency only if it looks like an agency; otherwise, use charges_summary if it looks like an agency
     raw_agency = clean_agency(doc.get("arresting_agency"))
-    cs = doc.get("charges_summary")
+    cs2 = doc.get("charges_summary")
     if is_agency_like(raw_agency):
         agency_val = raw_agency
-    elif is_agency_like(cs):
-        agency_val = cs
+    elif is_agency_like(cs2):
+        agency_val = cs2
     else:
         agency_val = None
     return build_norm_doc(
@@ -480,7 +545,7 @@ def norm_galveston(person: Dict[str, Any], event: Optional[Dict[str, Any]]) -> D
         category="Criminal",
         full_name=full_name,
         dob=parse_date_maybe(dob),
-        booking_date=parse_date_maybe(pick(booked_at, arrest_date)),
+        booking_date=parse_date_maybe(pick(booked_at, arrest_date, (event or {}).get("file_date"))),
         offense=offense,
         bond=None,
         bond_amount=bond_amount_val,
@@ -506,10 +571,13 @@ def norm_fortbend(doc: Dict[str, Any]) -> Dict[str, Any]:
     ch = doc.get("charges")
     if isinstance(ch, list):
         for item in ch:
-            if isinstance(item, dict) and (item.get("charge") or item.get("charge description")):
-                offense = item.get("charge") or item.get("charge description")
+            if isinstance(item, dict) and (item.get("charge") or item.get("charge description") or item.get("description") or item.get("offense")):
+                offense = item.get("charge") or item.get("charge description") or item.get("description") or item.get("offense")
                 break
-    offense = offense or doc.get("charge_summary")
+    if not offense:
+        cs = doc.get("charge_summary")
+        if isinstance(cs, str) and not is_agency_like(cs):
+            offense = cs
     bond_amount = to_money(doc.get("bond_total"))
     if bond_amount is None:
         # Fallback: sum per-charge amounts if present
@@ -529,7 +597,7 @@ def norm_fortbend(doc: Dict[str, Any]) -> Dict[str, Any]:
         bond=None,
         bond_amount=bond_amount,
         booking_number=booking_number,
-        case_number=None,
+        case_number=doc.get("case_number") or doc.get("cause_number"),
         spn=None,
         agency=None,
         facility=None,
@@ -764,6 +832,26 @@ def upsert_normals(db, county: str, docs: Iterable[Dict[str, Any]], *, dry_run: 
                 L.info(f"{county.title()}: sample → " + _format_sample(d))
             except Exception:
                 # Never let sampling break normalization
+                pass
+
+        # Attach a quick QA summary for debugging (not indexed)
+        qa = audit_summary(d)
+        if qa["missing"] or qa["weak"]:
+            d["qa_missing"] = qa["missing"]
+            d["qa_weak"] = qa["weak"]
+        # Optionally write a lightweight audit row
+        if NORMALIZE_AUDIT and not dry_run:
+            try:
+                db[AUDIT_COLLECTION].insert_one({
+                    "kind": "normalize_missing",
+                    "county": d.get("county"),
+                    "source": d.get("source"),
+                    "source_id": d.get("source_id"),
+                    "missing": qa["missing"],
+                    "weak": qa["weak"],
+                    "at": dt.datetime.now(dt.timezone.utc).isoformat()
+                })
+            except Exception:
                 pass
 
         if dry_run:
