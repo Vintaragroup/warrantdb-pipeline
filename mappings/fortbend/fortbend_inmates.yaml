@@ -1,0 +1,134 @@
+map_version: v0.1-fortbend-20250916b
+source: fortbend_inquiry
+county: fortbend
+collection: fortbend_inmates
+primary_key:
+  - booking_number
+  - jail_id
+
+fields:
+  county:
+    const: "fortbend"
+
+  category:
+    const: "Criminal"
+
+  full_name:
+    from: name
+    transforms:
+      - collapse_whitespace
+      - to_upper
+
+  last_name:
+    from: name
+    transform: extract_last
+
+  first_name:
+    from: name
+    transform: extract_first_plus_middle
+
+  # Fort Bend quirk: "booking_date" holds race values like BLACK/WHITE
+  race:
+    from: booking_date
+
+  gender:
+    const: null  # not present in shared samples
+
+  dob:
+    const: null
+
+  booking_number:
+    from: booking_number
+
+  spn:
+    const: null
+
+  jail_id:
+    any_of:
+      - from: jail_id
+      - from: id
+
+  booking_date:
+    any_of:
+      - from: booking_date_iso
+    transforms:
+      - parse_datetime:
+          formats:
+            - "yyyy-MM-dd"
+            - "MM/dd/yyyy"
+            - "MM/dd/yyyy HH:mm"
+      - to_iso_datetime
+      - default_midnight_utc_if_date_only: true
+
+  release_date:
+    const: null
+
+  offense:
+    derive: first_nonnull_from_paths
+    paths:
+      - "charges[0].charge_description"
+      - "charges[0].charge description"
+      - "charges[1].charge_description"
+      - "charges[1].charge description"
+
+  bond_amount:
+    derive: first_nonnull_parsed_amount_from
+    paths:
+      - "charges[0].bail_amount"
+      - "charges[0].bail amount"
+      - "bond_total"
+
+  bond_type:
+    derive: first_nonnull_from_paths
+    paths:
+      - "charges[0].bail_type"
+      - "charges[0].bail type"
+
+  case_number:
+    derive: first_nonnull_from_paths
+    paths:
+      - "charges[0].warrant_number"
+      - "charges[0].warrant number"
+      - "charges[0].docket"
+      - "charges[1].warrant_number"
+      - "charges[1].docket"
+
+  status:
+    const: "Active"
+    transforms:
+      - normalize_status  # feed shows custody via “In Custody” at UI; normalize here
+
+  court:
+    derive: first_nonnull_from_paths
+    paths:
+      - "charges[0].jus"
+      - "charges[0].issuing auth"
+
+  source:
+    const: "fortbend_inquiry"
+
+  source_url:
+    from: detail_url
+
+  scraped_at:
+    any_of:
+      - from: scraped_at
+      - from: fetched_at
+    transforms:
+      - to_iso_datetime
+
+  normalized_at:
+    transform: now_iso
+
+  time_bucket:
+    any_of:
+      - from: booking_age_category
+    transforms:
+      - to_lower
+
+  tags:
+    derive: derive_tags_from_offense
+
+_meta:
+  raw_id:
+    from: _id

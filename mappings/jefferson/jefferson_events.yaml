@@ -1,0 +1,285 @@
+map_version: v0.1-jefferson-20250917b
+mapping_id: "jefferson_events:v0.1-assert-bond"
+source: jefferson_events
+county: jefferson
+collection: jefferson_events
+
+primary_key:
+  - county
+  - category
+  - anchor
+
+fields:
+  county:
+    const: "jefferson"
+
+  category:
+    const: "Criminal"
+
+  full_name:
+    from: full_name
+
+  last_name:
+    from: last_name
+
+  first_name:
+    from: first_name
+
+  booking_number:
+    from: booking_number
+
+  middle_name:
+    const: null
+
+  dob:
+    const: null
+
+  gender:
+    from: sex
+    transforms:
+      - decode_sex_code
+
+  sex:
+    from: sex
+    transforms:
+      - decode_sex_code
+
+  race:
+    from: race
+    transforms:
+      - decode_race_code
+
+  agency:
+    from: agency
+
+  facility:
+    from: facility
+
+  booking_date:
+    from: booked_at
+    transforms:
+      - parse_date:
+          formats:
+            - "%Y-%m-%d"
+            - "%m/%d/%Y"
+            - "%-m/%-d/%Y"
+      - to_iso_date
+
+  release_date:
+    from: released_at
+    transforms:
+      - parse_date:
+          formats:
+            - "%Y-%m-%d"
+            - "%m/%d/%Y"
+            - "%-m/%-d/%Y"
+      - to_iso_date
+
+  # --- Bond fields ---
+  bond:
+    any_of:
+      - from: total_bond
+      - from: charges[0].bond
+      - from: charges[1].bond
+      - from: charges[2].bond
+    transforms:
+      - parse_money_or_na_to_number
+
+  bond_amount:
+    any_of:
+      - from: total_bond
+      - from: charges[0].bond
+      - from: charges[1].bond
+      - from: charges[2].bond
+    transforms:
+      - parse_money_or_na_to_number
+
+  bond_label:
+    derive: first_nonnull_parsed_type_from
+    paths:
+      - "charges[0].bond"
+      - "charges[1].bond"
+      - "charges[2].bond"
+
+  # bond_status derived from bond fields and label extraction
+  bond_status:
+    any_of:
+      - from: charges[0].bond
+      - from: charges[1].bond
+      - from: charges[2].bond
+    transforms:
+      - extract_bond_label
+      - to_upper
+
+  dbg_bond_numeric:
+    any_of:
+      - from: total_bond
+      - from: charges[0].bond
+      - from: charges[1].bond
+      - from: charges[2].bond
+    transforms:
+      - parse_money_or_na_to_number
+
+  # --- Court/charge/status/age ---
+  case_number:
+    derive: first_nonnull_from_paths
+    paths:
+      - "charges[0].docket"
+      - "charges[1].docket"
+      - "charges[2].docket"
+
+  docket_number:
+    from: case_number
+
+  charge:
+    any_of:
+      - from: charges[0].charge
+      - from: charges[1].charge
+      - from: charges[2].charge
+    transforms:
+      - to_upper
+      - collapse_whitespace
+
+  status:
+    from: status
+    transforms:
+      - normalize_status
+
+  age:
+    from: age
+    transforms:
+      - parse_age_years
+
+  # --- Debug fields (safe to remove later) ---
+  dbg_total_bond:
+    from: total_bond
+  dbg_ch0_bond:
+    from: charges[0].bond
+  dbg_ch1_bond:
+    from: charges[1].bond
+  dbg_ch2_bond:
+    from: charges[2].bond
+  dbg_case_number:
+    any_of:
+      - from: charges[0].docket
+      - from: charges[1].docket
+      - from: charges[2].docket
+  dbg_charge_raw:
+    any_of:
+      - from: charges[0].charge
+      - from: charges[1].charge
+      - from: charges[2].charge
+  dbg_status_raw:
+    from: status
+  dbg_age_raw:
+    from: age
+
+  source:
+    const: "jefferson_events"
+
+  source_url:
+    from: source_url
+
+  anchor:
+    any_of:
+      - from: source_url
+      - from: _id
+
+  scraped_at:
+    any_of:
+      - from: scraped_at
+      - from: _ingested_at
+      - from: fetched_at
+      - from: migrated_at
+      - from: first_seen_at
+      - from: inserted_at
+      - from: detail_fetched_at
+    transforms:
+      - parse_datetime
+      - to_iso_datetime
+
+  normalized_at:
+    transform: now_iso
+
+  # Prefer the source's own bucket if present; otherwise fall back to our date-based derive
+  time_bucket:
+    any_of:
+      - from: booking_age_category
+      - derive: time_bucket_from_booking_date
+    transforms:
+      # Optional: normalize labels to your preferred ones
+      - map_values:
+          mapping:
+            "24h": "24h"
+            "48h": "48h"
+            "72h": "72h"
+            "30d": "30d"
+            "60d": "60d"
+            "180d": "180d"
+            "360d": "360d"
+            "365_days_or_older": "over_360days"
+
+  dbg_time_bucket_src:
+    any_of:
+      - from: booking_age_category
+      - const: "derived_from_booking_date"
+
+  offense:
+    any_of:
+      - from: charges[0].charge
+      - from: charges[1].charge
+    transforms:
+      - to_upper
+      - collapse_whitespace
+
+  tags:
+    derive: derive_tags_from_offense
+
+_meta:
+  raw_id:
+    from: _id
+  age_years:
+    from: age
+    transforms:
+      - parse_age_years
+
+charges_mapping:
+  repeat_on: charges
+  fields:
+    county:
+      const: "jefferson"
+
+    inmate_id:
+      from: person_id
+
+    booking_number:
+      from: booking_number
+
+    sequence:
+      derive: current_index
+
+    charge_description:
+      from: charge
+
+    severity_code:
+      from: status
+
+    case_number:
+      from: docket
+
+    bail_amount:
+      from: bond
+      transforms:
+        - parse_money_in_string_to_number
+
+    bond_conditions:
+      from: condition
+
+    source:
+      const: "jefferson_events"
+
+    source_url:
+      from: source_url
+
+    normalized_at:
+      transform: now_iso

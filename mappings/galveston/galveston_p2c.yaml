@@ -1,0 +1,166 @@
+map_version: v0.1-galveston-20250916c
+source: galveston_p2c
+county: galveston
+collection: Galveston_events
+primary_key:
+  - person_id
+  - source_url
+
+fields:
+  county:
+    const: "galveston"
+
+  category:
+    const: "Criminal"
+
+  full_name:
+    const: null  # P2C sample didn’t include name string
+
+  last_name:
+    const: null
+
+  first_name:
+    const: null
+
+  middle_name:
+    const: null
+
+  dob:
+    const: null
+
+  gender:
+    from: sex
+
+  race:
+    from: race
+
+  booking_number:
+    from: booking_number  # often null
+
+  booking_date:
+    from: booked_at
+    transforms:
+      - parse_date:
+          formats:
+            - "yyyy-MM-dd"
+            - "M/d/yyyy"
+            - "MM/dd/yyyy"
+      - to_iso_datetime
+      - default_midnight_utc_if_date_only: true
+
+  release_date:
+    from: released_at
+    transforms:
+      - parse_date:
+          formats:
+            - "yyyy-MM-dd"
+            - "M/d/yyyy"
+            - "MM/dd/yyyy"
+      - to_iso_datetime
+
+  offense:
+    derive: first_nonnull_from_paths
+    paths:
+      - "charges[0].charge"
+      - "charges[1].charge"
+      - "charges[2].charge"
+
+  bond_amount:
+    any_of:
+      - from: total_bond
+    transforms:
+      - parse_money_or_na_to_number  # "$1,500.00" -> 1500.00; "N/A" -> null
+
+  bond_type:
+    derive: bond_type_from_charge_bonds  # scans charges[].bond and extracts label before amount
+
+  case_number:
+    derive: first_nonnull_from_paths
+    paths:
+      - "charges[0].docket"
+      - "charges[1].docket"
+      - "charges[2].docket"
+
+  status:
+    from: status
+    transforms:
+      - normalize_status
+
+  court:
+    const: null
+
+  source:
+    const: "galveston_p2c"
+
+  source_url:
+    from: source_url
+
+  scraped_at:
+    from: scraped_at
+    transforms:
+      - to_iso_datetime
+
+  normalized_at:
+    transform: now_iso
+
+  time_bucket:
+    any_of:
+      - from: booking_age_category
+    transforms:
+      - to_lower
+
+  tags:
+    derive: derive_tags_from_offense
+
+_meta:
+  raw_id:
+    from: _id
+  person_id:
+    from: person_id
+  age_years:
+    from: age
+    transforms:
+      - parse_age_years
+
+charges_mapping:
+  repeat_on: charges
+  fields:
+    county:
+      const: "galveston"
+
+    inmate_id:
+      from: person_id
+
+    booking_number:
+      from: booking_number
+
+    sequence:
+      derive: current_index
+
+    charge_description:
+      from: charge
+
+    severity_code:
+      const: null  # P2C uses status for process; no felony code provided
+
+    case_number:
+      from: docket
+
+    bail_type_code:
+      from: bond
+      transforms:
+        - extract_bond_label  # "CASH OR SURETY"
+
+    bail_amount:
+      from: bond
+      transforms:
+        - parse_money_in_string_to_number
+
+    source:
+      const: "galveston_p2c"
+
+    source_url:
+      from: source_url
+
+    normalized_at:
+      transform: now_iso

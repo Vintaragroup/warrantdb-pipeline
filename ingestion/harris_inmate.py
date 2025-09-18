@@ -496,6 +496,7 @@ def run_harris_ingest(file_date_iso: str | None = None) -> Dict[str, Dict[str, L
 
     # --- Idempotence: if DB already has all 6 with this filename date, skip work.
     if _already_have_latest(db, latest_by_key):
+        print("[harris] No new files to ingest, skipping (all up to date).")
         return {
             "bond":     {g: [] for g in GROUPS},
             "misfel":   {g: [] for g in GROUPS},
@@ -507,38 +508,63 @@ def run_harris_ingest(file_date_iso: str | None = None) -> Dict[str, Dict[str, L
 
     parsed = {"bond": [], "misfel": [], "nafiling": []}
     booking_categories = {"bond": {}, "misfel": {}, "nafiling": {}}
-    
+
+    # Track which files are stale and skip processing them
+    stale_keys = []
+    today_file_date = file_date
+    for g in GROUPS:
+        for kind in KINDS:
+            key = f"{g}/{kind}"
+            file_key_date = latest_by_key.get(key)
+            # If the file's date does not match today_file_date, skip
+            if file_key_date != today_file_date:
+                print(f"[harris] SKIP {key} stale file_date={file_key_date}")
+                stale_keys.append(key)
+
     for g in GROUPS:
         # bond
-        rows = _parse_rows(six[f"{g}/bond"])
-        docs = parse_bond(rows, file_date, g)
-        for d in docs:
-            d["source_url"] = urls_by_key[f"{g}/bond"]
-            d["source_filename_date"] = latest_by_key[f"{g}/bond"]
-            # Track categories
-            cat = d.get("booking_age_category", "unknown")
-            booking_categories["bond"][cat] = booking_categories["bond"].get(cat, 0) + 1
-        parsed["bond"].extend(docs)
+        key_bond = f"{g}/bond"
+        if key_bond not in stale_keys:
+            rows = _parse_rows(six[key_bond])
+            docs = parse_bond(rows, file_date, g)
+            for d in docs:
+                d["source_url"] = urls_by_key[key_bond]
+                d["source_filename_date"] = latest_by_key[key_bond]
+                # Track categories
+                cat = d.get("booking_age_category", "unknown")
+                booking_categories["bond"][cat] = booking_categories["bond"].get(cat, 0) + 1
+            parsed["bond"].extend(docs)
+        else:
+            # No docs for skipped file
+            pass
 
         # misfel
-        rows = _parse_rows(six[f"{g}/misfel"])
-        docs = parse_misfel(rows, file_date, g)
-        for d in docs:
-            d["source_url"] = urls_by_key[f"{g}/misfel"]
-            d["source_filename_date"] = latest_by_key[f"{g}/misfel"]
-            cat = d.get("booking_age_category", "unknown")
-            booking_categories["misfel"][cat] = booking_categories["misfel"].get(cat, 0) + 1
-        parsed["misfel"].extend(docs)
+        key_misfel = f"{g}/misfel"
+        if key_misfel not in stale_keys:
+            rows = _parse_rows(six[key_misfel])
+            docs = parse_misfel(rows, file_date, g)
+            for d in docs:
+                d["source_url"] = urls_by_key[key_misfel]
+                d["source_filename_date"] = latest_by_key[key_misfel]
+                cat = d.get("booking_age_category", "unknown")
+                booking_categories["misfel"][cat] = booking_categories["misfel"].get(cat, 0) + 1
+            parsed["misfel"].extend(docs)
+        else:
+            pass
 
         # nafiling
-        rows = _parse_rows(six[f"{g}/nafiling"])
-        docs = parse_nafiling(rows, file_date, g)
-        for d in docs:
-            d["source_url"] = urls_by_key[f"{g}/nafiling"]
-            d["source_filename_date"] = latest_by_key[f"{g}/nafiling"]
-            cat = d.get("booking_age_category", "unknown")
-            booking_categories["nafiling"][cat] = booking_categories["nafiling"].get(cat, 0) + 1
-        parsed["nafiling"].extend(docs)
+        key_nafiling = f"{g}/nafiling"
+        if key_nafiling not in stale_keys:
+            rows = _parse_rows(six[key_nafiling])
+            docs = parse_nafiling(rows, file_date, g)
+            for d in docs:
+                d["source_url"] = urls_by_key[key_nafiling]
+                d["source_filename_date"] = latest_by_key[key_nafiling]
+                cat = d.get("booking_age_category", "unknown")
+                booking_categories["nafiling"][cat] = booking_categories["nafiling"].get(cat, 0) + 1
+            parsed["nafiling"].extend(docs)
+        else:
+            pass
 
     # Enhanced logging with booking categories
     print(f"[harris] Processing complete:")
@@ -554,11 +580,14 @@ def run_harris_ingest(file_date_iso: str | None = None) -> Dict[str, Dict[str, L
             category = d.get("booking_age_category", "unknown")
             print(f"[harris] SUCCESS: {name} [{category}]")
 
-    # Mongo upserts (unchanged)
+    # Mongo upserts: only upsert if not skipped
     col_b, col_m, col_n = _get_cols(db)
-    _bulk_upsert(col_b, parsed["bond"], file_date)
-    _bulk_upsert(col_m, parsed["misfel"], file_date)
-    _bulk_upsert(col_n, parsed["nafiling"], file_date)
+    if any(f"{g}/bond" not in stale_keys for g in GROUPS):
+        _bulk_upsert(col_b, parsed["bond"], file_date)
+    if any(f"{g}/misfel" not in stale_keys for g in GROUPS):
+        _bulk_upsert(col_m, parsed["misfel"], file_date)
+    if any(f"{g}/nafiling" not in stale_keys for g in GROUPS):
+        _bulk_upsert(col_n, parsed["nafiling"], file_date)
 
     window = int(_env("HARRIS_NEW_WINDOW_DAYS", "30"))
     alerts = {

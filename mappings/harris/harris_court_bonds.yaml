@@ -1,0 +1,176 @@
+map_version: v0.1-harris-20250918a
+mapping_id: "harris_bond:v0.1-align-jefferson"
+source: harris_bond
+county: harris
+collection: harris_bond
+
+primary_key:
+  - county
+  - category
+  - anchor
+
+fields:
+  # --- Identity / keys ---
+  county:
+    const: "harris"
+
+  # Harris docs sometimes have group "Civil" or "Criminal" (or none).
+  # Default to "Criminal" if missing.
+  category:
+    any_of:
+      - from: group
+      - const: "Criminal"
+
+  # Prefer the already-formatted "LAST, FIRST MIDDLE" if present; fallback builds later if we decide.
+  full_name:
+    any_of:
+      - from: name
+      - from: last_name  # temporary fallback; see dbg fields
+
+  last_name:
+    from: last_name
+
+  # Harris uses "first_middle"; we’ll treat that as first_name (we can split later if needed).
+  first_name:
+    from: first_middle
+
+  booking_number:
+    const: null
+
+  middle_name:
+    const: null
+
+  dob:
+    const: null
+
+  # --- Demographics ---
+  # Harris provides sex_code/race_code; we’ll decode them with transforms.
+  # If your existing decode_* transforms don’t recognize Harris codes yet,
+  # they’ll safely return None; we surface raw codes in dbg_* fields to tune later.
+  gender:
+    from: sex_code
+    transforms:
+      - decode_sex_code
+  sex:
+    from: sex_code
+    transforms:
+      - decode_sex_code
+
+  race:
+    from: race_code
+    transforms:
+      - decode_race_code
+
+  age:
+    const: null  # Harris bond feed doesn’t include age; leave null to keep schema stable
+
+  # --- Agency / facility ---
+  agency:
+    const: "Harris County (Bond Docket)"
+  facility:
+    const: null
+
+  # --- Dates ---
+  # Align with Jefferson by using file_date as booking_date analog
+  booking_date:
+    from: file_date
+    transforms:
+      - parse_date:
+          formats:
+            - "%Y-%m-%d"
+            - "%m/%d/%Y"
+            - "%-m/%-d/%Y"
+      - to_iso_date
+
+  release_date:
+    const: null
+
+  # --- Bond fields ---
+  bond:
+    any_of:
+      - from: bond_amount
+      - from: bond_note
+    transforms:
+      - parse_money_or_na_to_number
+
+  bond_amount:
+    any_of:
+      - from: bond_amount
+      - from: bond_note
+    transforms:
+      - parse_money_or_na_to_number
+      - default_null
+
+  # Keep human-readable labels like "UNSECURED GOB ELIGIBLE" or "REFER TO MAGISTRATE"
+  bond_label:
+    any_of:
+      - from: bond_note
+      - from: bond_amount
+    transforms:
+      - strip_whitespace
+
+  # --- Charge / case / status ---
+  case_number:
+    from: case_number
+    transforms:
+      - digits_prefix
+
+  charge:
+    from: offense
+
+  status:
+    derive: harris_status_from_source_and_note
+
+  court:
+    from: court_no
+
+  # --- Source / anchor ---
+  source:
+    from: source
+
+  source_url:
+    from: source_url
+
+  # Stable anchor: use case_number; fallback to spn.
+  anchor:
+    any_of:
+      - from: case_number
+        transforms:
+          - digits_prefix
+      - from: spn
+        transforms:
+          - strip_whitespace
+
+  # --- Timestamps ---
+  scraped_at:
+    any_of:
+      - from: updated_at
+      - from: first_seen_at
+    transforms:
+      - parse_datetime
+      - to_iso_datetime
+
+  normalized_at:
+    transform: now_iso
+
+  # --- Optional parity fields (present in Jefferson) ---
+  time_bucket:
+    any_of:
+      - from: booking_age_category
+      - const: null
+  tags:
+    const: []          # empty list for parity; we can enrich later
+
+  # --- DEBUG surfaced fields (remove once verified) ---
+  dbg_sex_code:
+    from: sex_code
+  dbg_race_code:
+    from: race_code
+  dbg_group:
+    from: group
+  dbg_bond_note:
+    from: bond_note
+  dbg_court_group:
+    from: court_group
+  dbg_address:
+    from: address

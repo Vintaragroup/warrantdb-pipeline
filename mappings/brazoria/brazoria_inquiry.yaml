@@ -1,0 +1,139 @@
+map_version: v0.1-brazoria-20250916b
+source: brazoria_inquiry
+county: brazoria
+collection: brazoria_inmates
+primary_key:
+  - booking_number
+
+fields:
+  county:
+    const: "brazoria"
+
+  category:
+    const: "Criminal"
+
+  full_name:
+    from: name
+    transforms:
+      - collapse_whitespace
+      - to_upper
+
+  last_name:
+    from: name
+    transform: extract_last
+
+  first_name:
+    from: name
+    transform: extract_first_plus_middle
+
+  middle_name:
+    from: name
+    transform: extract_middle_initial
+
+  dob:
+    any_of:
+      - from: dob
+    transforms:
+      - parse_date:
+          formats:
+            - "yyyy-MM-dd"
+            - "MM/dd/yyyy"
+      - to_iso_date
+
+  gender:
+    from: sex
+
+  race:
+    from: race
+
+  booking_number:
+    from: booking_number
+
+  booking_date:
+    any_of:
+      - from: booking_date_iso
+      - from: booking_date
+    transforms:
+      - parse_datetime:
+          formats:
+            - "yyyy-MM-dd"
+            - "MM/dd/yyyy"
+            - "MM/dd/yyyy HH:mm"
+      - to_iso_datetime
+      - default_midnight_utc_if_date_only: true
+
+  release_date:
+    any_of:
+      - from: release_date_iso
+      - from: release_date
+    transforms:
+      - parse_date:
+          formats:
+            - "yyyy-MM-dd"
+            - "MM/dd/yyyy"
+      - to_iso_datetime
+
+  offense:
+    derive: first_nonnull_from_paths
+    paths:
+      - "charges[0].charge"
+      - "charges[1].charge"
+      - "primary_charge"
+
+  bond_amount:
+    derive: first_nonnull_parsed_amount_from
+    paths:
+      - "charges[0].bond/type"
+      - "charges[1].bond/type"
+      - "bond_total"
+
+  bond_type:
+    derive: first_nonnull_parsed_type_from
+    paths:
+      - "charges[0].bond/type"
+      - "charges[1].bond/type"
+
+  case_number:
+    derive: first_nonnull_from_paths
+    paths:
+      - "charges[0].case_no"
+      - "charges[0].docket"
+      - "case_number"
+
+  status:
+    from: status
+    transforms:
+      - normalize_status
+
+  court:
+    derive: first_nonnull_from_paths
+    paths:
+      - "charges[0].issuing auth"
+      - "charges[0].court"
+
+  source:
+    const: "brazoria_inquiry"
+
+  source_url:
+    from: detail_url
+
+  scraped_at:
+    from: scraped_at
+    transforms:
+      - to_iso_datetime
+
+  normalized_at:
+    transform: now_iso
+
+  time_bucket:
+    any_of:
+      - from: booking_age_category
+    transforms:
+      - to_lower
+
+  tags:
+    derive: derive_tags_from_offense
+
+_meta:
+  raw_id:
+    from: _id
