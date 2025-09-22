@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, re, csv, io, datetime as dt
+import os, re, csv, io, datetime as dt, json
 from typing import Any, Dict, List, Tuple
 import requests
 from pymongo import MongoClient, UpdateOne, ASCENDING
@@ -26,6 +26,18 @@ def _env(k: str, d: str | None = None) -> str | None:
 
 def _today_iso() -> str:
     return dt.date.today().isoformat()
+
+
+def _normalize_date_token(value: str | None) -> dt.date | None:
+    if not value:
+        return None
+    value = value.strip()
+    for fmt in ("%Y-%m-%d", "%m-%d-%y", "%m/%d/%Y", "%m/%d/%y"):
+        try:
+            return dt.datetime.strptime(value, fmt).date()
+        except ValueError:
+            continue
+    return None
 
 def _to_int(s: str | None) -> int | None:
     if not s: return None
@@ -361,52 +373,104 @@ def _new_entries(col, file_date: str, window_days: int, group: str) -> List[Dict
 
 # ---------- Download strategy ----------
 
+def _clean_rel_path(path: str) -> str:
+    path = path.replace("\\", "/")
+    path = re.sub(r"https?://[^/]+/", "", path, flags=re.I)
+    path = re.sub(r"^Files/", "", path, flags=re.I)
+    path = re.sub(r"/+", "/", path)
+    return path.lstrip("/")
+
+
+def _collect_candidate_paths(html: str) -> set[str]:
+    candidates: set[str] = set()
+
+    # 1) JS DownloadDoc('Civil\\08-17-25-bond.txt') style
+    js_matches = re.findall(r"DownloadDoc\(['\"]([^'\"]+\.txt)['\"]\)", html, flags=re.IGNORECASE)
+    candidates.update(_clean_rel_path(p) for p in js_matches)
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    # 2) href attributes containing .txt
+    for tag in soup.find_all(['a', 'link'], href=True):
+        href = tag.get("href")
+        if href and href.lower().endswith('.txt'):
+            candidates.add(_clean_rel_path(href))
+
+    # 3) onclick/data-url attributes that include .txt
+    for attr in ("onclick", "data-url", "data-href", "data-target", "value"):
+        for node in soup.find_all(attrs={attr: True}):
+            text = node.get(attr)
+            if not text:
+                continue
+            for match in re.findall(r"([A-Za-z0-9_\\/\-]+\.txt)", text):
+                candidates.add(_clean_rel_path(match))
+
+    # 4) plain text fallback: look for Civil/... lines
+    for match in re.findall(r"((?:Civil|Criminal)[\\\/]\d{2}-\d{2}-\d{2}-[A-Za-z]+\.txt)", html, flags=re.IGNORECASE):
+        candidates.add(_clean_rel_path(match))
+
+    return {c for c in candidates if c.lower().endswith('.txt')}
+
+
 def _discover_latest_paths_from_page() -> Dict[str, str]:
     """
     Return most-recent RELATIVE path for each of:
       Civil|Criminal × bond|misfel|nafiling
     """
-    import re
     if not PAGE_URL:
         raise RuntimeError("HARRIS_DATASETS_PAGE not set")
 
     html = _fetch_text(PAGE_URL)
-
-    # JS calls like DownloadDoc('Civil\\08-17-25-bond.txt')
-    paths = re.findall(r"DownloadDoc\('([^']+\.txt)'\)", html, flags=re.IGNORECASE)
-    paths = [p.replace("\\", "/") for p in paths]
-    # normalize accidental double slashes and any leading slash
-    paths = [re.sub(r"/+", "/", p).lstrip("/") for p in paths]
-
-    # Fallback: scan the Civil/Criminal sections if JS not present
-    if not paths:
-        blocks = {
-            "Civil": re.search(r"Public Datasets.*?Civil(.*?)(?:Criminal|$)", html, flags=re.S|re.I),
-            "Criminal": re.search(r"Criminal(.*)$", html, flags=re.S|re.I),
-        }
-        for grp, m in blocks.items():
-            if not m:
-                continue
-            text = m.group(1)
-            for kind in KINDS:
-                mfile = re.search(r"(\d{2}-\d{2}-\d{2}-" + kind + r"\.txt)", text, flags=re.I)
-                if mfile:
-                    paths.append(f"{grp}/{mfile.group(1)}")
+    candidates = _collect_candidate_paths(html)
 
     latest: Dict[str, str] = {}
+
+    def pick_latest(match_group: str, kind: str) -> str | None:
+        pattern = re.compile(rf"^{match_group}/(\d{{2}}-\d{{2}}-\d{{2}})-{kind}\.txt$", re.I)
+        best_path = None
+        best_date = None
+        for cand in candidates:
+            m = pattern.match(cand)
+            if not m:
+                continue
+            date_str = m.group(1)
+            try:
+                dt_obj = dt.datetime.strptime(date_str, "%m-%d-%y")
+            except ValueError:
+                continue
+            if best_date is None or dt_obj > best_date:
+                best_date = dt_obj
+                best_path = cand
+        return best_path
+
     for g in GROUPS:
         for k in KINDS:
-            match = next(
-                (p for p in paths if p.lower().startswith(g.lower()+"/") and p.lower().endswith(f"{k}.txt")),
-                None
-            )
-            if match:
-                latest[f"{g}/{k}"] = match  # REL path
+            picked = pick_latest(g, k)
+            if picked:
+                latest[f"{g}/{k}"] = picked
 
     want = [f"{g}/{k}" for g in GROUPS for k in KINDS]
-    if len(latest) != 6:
-        missing = [k for k in want if k not in latest]
-        raise RuntimeError(f"Could not discover latest datasets from page. Missing: {missing}")
+    missing = [k for k in want if k not in latest]
+
+    if missing:
+        # allow manual override via JSON env mapping
+        fallback_env = _env("HARRIS_PATH_OVERRIDES")
+        if fallback_env:
+            try:
+                overrides = json.loads(fallback_env)
+                for key in missing:
+                    override_path = overrides.get(key)
+                    if override_path:
+                        latest[key] = _clean_rel_path(override_path)
+                missing = [k for k in want if k not in latest]
+            except Exception as exc:
+                print(f"[harris] Failed to parse HARRIS_PATH_OVERRIDES: {exc}")
+
+    if missing:
+        raise RuntimeError(
+            "Could not discover latest datasets from page. Missing: "
+            f"{missing}. Candidates found: {sorted(candidates)[:10]}"
+        )
 
     return latest
 
@@ -478,7 +542,9 @@ def _already_have_latest(db, latest_by_key: Dict[str, str]) -> bool:
     return True
 
 def run_harris_ingest(file_date_iso: str | None = None) -> Dict[str, Dict[str, List[Dict[str, Any]]]]:
-    file_date = file_date_iso or _today_iso()
+    requested_date = file_date_iso or _today_iso()
+    run_date_obj = _normalize_date_token(requested_date)
+    file_date = run_date_obj.isoformat() if run_date_obj else requested_date
 
     # Discover which 6 files are currently the latest (absolute URLs).
     urls_by_key = _discover_latest_paths_from_page()  # e.g., {"Civil/bond": ".../Civil/08-21-25-bond.txt", ...}
@@ -512,12 +578,17 @@ def run_harris_ingest(file_date_iso: str | None = None) -> Dict[str, Dict[str, L
     # Track which files are stale and skip processing them
     stale_keys = []
     today_file_date = file_date
+    today_date_obj = run_date_obj
     for g in GROUPS:
         for kind in KINDS:
             key = f"{g}/{kind}"
             file_key_date = latest_by_key.get(key)
-            # If the file's date does not match today_file_date, skip
-            if file_key_date != today_file_date:
+            key_date_obj = _normalize_date_token(file_key_date)
+            if today_date_obj and key_date_obj:
+                same_day = key_date_obj == today_date_obj
+            else:
+                same_day = file_key_date == today_file_date
+            if not same_day:
                 print(f"[harris] SKIP {key} stale file_date={file_key_date}")
                 stale_keys.append(key)
 

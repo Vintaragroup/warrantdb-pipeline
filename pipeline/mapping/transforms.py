@@ -70,6 +70,16 @@ def to_upper(x):
 def to_lower(x):
     return x.lower() if isinstance(x, str) else x
 
+def strip_whitespace(x):
+    return x.strip() if isinstance(x, str) else x
+
+def default_null(x):
+    if x is None:
+        return None
+    if isinstance(x, str) and x.strip() == "":
+        return None
+    return x
+
 # ---------- date/time transforms ----------
 
 def _normalize_strptime(fmt: str) -> str:
@@ -555,6 +565,7 @@ TRANSFORMS = {
     "collapse_whitespace": collapse_whitespace,
     "to_upper": to_upper,
     "to_lower": to_lower,
+    "strip_whitespace": strip_whitespace,
     "parse_date": parse_date,
     "parse_datetime": parse_datetime,
     "to_iso_date": to_iso_date,
@@ -565,6 +576,7 @@ TRANSFORMS = {
     "parse_money_or_na_to_number": parse_money_or_na_to_number,
     "none_if_blank": none_if_blank,
     "safe_float": safe_float,
+    "default_null": default_null,
     "normalize_bond_label": normalize_bond_label,
     "extract_bond_label": extract_bond_label,
     "extract_and_normalize_bond_label": extract_and_normalize_bond_label,

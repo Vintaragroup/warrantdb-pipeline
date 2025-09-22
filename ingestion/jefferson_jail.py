@@ -9,6 +9,7 @@ from datetime import datetime
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 from pathlib import Path
+import threading
 
 def load_surnames(path="configs/jefferson_lastnames.txt") -> List[str]:
     """Load non-empty, stripped lines from a surname file if it exists."""
@@ -87,10 +88,11 @@ SNAPSHOT_OVERWRITE = os.getenv("JEFF_SNAPSHOT_OVERWRITE", "false").strip().lower
 SNAPSHOT_KEEP_PER_KIND = int(os.getenv("JEFF_MAX_SNAPSHOTS_PER_KIND", "20"))
 SNAPSHOT_MAX_TOTAL = int(os.getenv("JEFF_MAX_SNAPSHOTS_TOTAL", "200"))
 
-# Minimum required prefix lengths (site seems to reject too-short queries)
-MIN_LAST_LEN = int(os.getenv("JEFF_MIN_LAST_LEN", "2"))
-MIN_FIRST_LEN = int(os.getenv("JEFF_MIN_FIRST_LEN", "1"))
 SEARCH_DELAY = float(os.getenv("JEFF_SEARCH_DELAY_SEC", "1"))
+JEFF_FORCE_RUN = os.getenv("JEFF_FORCE_RUN", "").strip().lower() in ("1", "true", "yes")
+JEFF_NEW_ID_WINDOW = int(os.getenv("JEFF_NEW_ID_WINDOW", "200"))
+JEFF_NEW_ID_MISS_LIMIT = int(os.getenv("JEFF_NEW_ID_MISS_LIMIT", "10"))
+STATE_DOC_ID = "jefferson_scrape_state"
 
 # ------- helpers -------
 def _ensure_dir(path: str) -> None:
@@ -133,6 +135,21 @@ def _prune_global() -> None:
             pass
 
 
+def _load_surnames_from_mongo(db) -> List[str]:
+    if db is None:
+        return []
+    try:
+        coll = db["jefferson_events"]
+    except Exception:
+        return []
+    try:
+        names = coll.distinct("last_name")
+    except Exception:
+        return []
+    cleaned = {str(n).strip().upper() for n in names if isinstance(n, str) and n.strip()}
+    return sorted(cleaned)
+
+
 def _write_snapshot(kind: str, name: str, html: str) -> None:
     if not SNAPSHOT_ENABLE:
         return
@@ -157,27 +174,6 @@ def _write_snapshot(kind: str, name: str, html: str) -> None:
     except Exception:
         pass
 
-
-def _expand_to_min_len(prefixes: List[str], min_len: int) -> List[str]:
-    """Ensure each prefix is at least min_len by expanding with A..Z grid.
-    Example: ["A","B"], min_len=2 -> ["AA".."AZ","BA".."BZ"].
-    """
-    if min_len <= 1:
-        return prefixes
-    out: List[str] = []
-    for p in prefixes:
-        p = (p or "").upper()
-        if len(p) >= min_len:
-            out.append(p)
-            continue
-        # Build cartesian product to reach min_len
-        needed = min_len - len(p)
-        layer = [p]
-        for _ in range(needed):
-            layer = [q + chr(c) for q in layer for c in range(ord('A'), ord('Z') + 1)]
-        out.extend(layer)
-    return out
-
 def _money_to_float(s: str | None) -> Optional[float]:
     if not s:
         return None
@@ -200,6 +196,61 @@ def _split_name(full: str) -> Tuple[str, str]:
     if len(parts) >= 2:
         return " ".join(parts[:-1]), parts[-1]
     return full, ""
+
+
+def _parse_detail_id(url: str | None) -> Optional[int]:
+    if not url:
+        return None
+    m = re.search(r"/(?:Detail|Details)/(\d+)", url)
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except Exception:
+        return None
+
+
+def _extract_last_updated(html: str) -> Optional[str]:
+    if not html:
+        return None
+    soup = BeautifulSoup(html, "html.parser")
+    marker = soup.find(string=re.compile(r"Last updated", re.I))
+    if not marker:
+        return None
+    parent = marker.parent if hasattr(marker, "parent") else None
+    if parent:
+        bold = parent.find("b") if hasattr(parent, "find") else None
+        if bold and bold.get_text(strip=True):
+            return bold.get_text(strip=True)
+    if hasattr(marker, "next_element"):
+        nxt = marker.next_element
+        if nxt and hasattr(nxt, "strip"):
+            text = nxt.strip()
+            if text:
+                return text
+    return None
+
+
+def _snapshot_detail_failure(detail_id: str, body: str) -> None:
+    if not body:
+        return
+    try:
+        _write_snapshot("detail_error", detail_id, body)
+    except Exception:
+        pass
+
+
+def _is_no_results_page(html: str) -> bool:
+    if not html:
+        return False
+    soup = BeautifulSoup(html, "html.parser")
+    header = soup.find("h3", class_=re.compile(r"red-text", re.I))
+    if header and "No results found" in header.get_text(strip=True):
+        return True
+    title = soup.find("title")
+    if title and "No results" in title.get_text(strip=True):
+        return True
+    return False
 
 def _pick(*vals):
     for v in vals:
@@ -535,20 +586,50 @@ class JeffersonJailScraper(AuditedScraper):
 
         return {"person": person, "event": event}
 
-    def fetch(self, *, letters: str = "A-C", first_letters: str = "", append_wildcard: Optional[bool] = None) -> Iterable[Dict[str, Any]]:
-        """Fetch inmates from Jefferson County jail."""
-        letters = os.getenv("JEFF_LETTERS", letters)
-        first_letters = os.getenv("JEFF_FIRST_LETTERS", first_letters)
-        append_wildcard = False  # Always false - wildcards don't work
+    def fetch(self, *, letters: str = "", first_letters: str = "", append_wildcard: Optional[bool] = None) -> Iterable[Dict[str, Any]]:
+        """Fetch inmates from Jefferson County jail using Mongo-derived surnames."""
 
-        print(f"[jeff] START: letters={letters} first_letters={first_letters or '(none)'}")
+        letters_spec = os.getenv("JEFF_LETTERS", letters)
+        first_letters_spec = os.getenv("JEFF_FIRST_LETTERS", first_letters)
+        append_wildcard = False
 
-        # Start audit tracking
+        print(f"[jeff] START: letters={letters_spec or '(all)'} first_letters={first_letters_spec or '(auto)'}")
+
         self._audit_start(
-            letters_spec=letters,
-            first_letters_spec=first_letters or "",
+            letters_spec=letters_spec,
+            first_letters_spec=first_letters_spec or "",
             append_wildcard=append_wildcard
         )
+
+        state_coll = None
+        state_doc: Dict[str, Any] = {}
+        last_seen_id = 0
+        last_seen_stamp: Optional[str] = None
+        if self.db is not None:
+            try:
+                state_coll = self.db["ingest_state"]
+                state_doc = state_coll.find_one({"_id": STATE_DOC_ID}) or {}
+                last_seen_id = int(state_doc.get("max_detail_id") or 0)
+                last_seen_stamp = state_doc.get("last_updated")
+            except Exception as exc:
+                print(f"[jeff] Warning: could not load ingest state: {exc}")
+                state_coll = None
+
+        current_last_updated: Optional[str] = None
+        try:
+            form_resp = self._sess.get(SEARCH_FORM_URL, timeout=REQ_TIMEOUT)
+            form_resp.raise_for_status()
+            current_last_updated = _extract_last_updated(form_resp.text)
+        except Exception as exc:
+            print(f"[jeff] Warning: could not fetch search form for timestamp: {exc}")
+
+        surnames = _load_surnames_from_mongo(self.db)
+        if not surnames:
+            surnames = load_surnames(SURNAME_FILE)
+            if surnames:
+                print(f"[jeff] Using {len(surnames)} surnames from {SURNAME_FILE}")
+        else:
+            print(f"[jeff] Loaded {len(surnames)} surnames from Mongo")
 
         def expand_range(spec: str) -> List[str]:
             spec = (spec or "").strip()
@@ -567,152 +648,196 @@ class JeffersonJailScraper(AuditedScraper):
                 return [s.strip().upper() for s in spec.split(",") if s.strip()]
             return [spec.upper()]
 
-        # Try to load surname list if available
-        if os.path.exists(SURNAME_FILE):
-            last_prefixes = load_surnames(SURNAME_FILE)
-            if last_prefixes:
-                print(f"[jeff] Loaded {len(last_prefixes)} surnames from {SURNAME_FILE}")
-                # Ignore letters/expand_range when surnames file is present and non-empty
-            else:
-                print(f"[jeff] Surname file {SURNAME_FILE} is empty, falling back to expand_range")
-                last_prefixes = expand_range(letters)
-                last_prefixes = _expand_to_min_len(last_prefixes, MIN_LAST_LEN)
-        else:
-            last_prefixes = expand_range(letters)
-            last_prefixes = _expand_to_min_len(last_prefixes, MIN_LAST_LEN)
+        allowed_prefixes = expand_range(letters_spec)
+        if allowed_prefixes:
+            allowed_prefixes = sorted(set(allowed_prefixes))
+            surnames = [s for s in surnames if any(s.startswith(pref) for pref in allowed_prefixes)]
 
-        first_prefixes = expand_range(first_letters) if first_letters else [""]
-        first_prefixes = _expand_to_min_len(first_prefixes, MIN_FIRST_LEN)
+        if not surnames:
+            print("[jeff] No surnames available; nothing to do.")
+            self._audit_finish(summary_seen_links=0)
+            return
 
+        alphabet = [chr(c) for c in range(ord('A'), ord('Z') + 1)]
+        split_first_prefixes = expand_range(first_letters_spec)
+        if not split_first_prefixes:
+            split_first_prefixes = alphabet
+
+        max_detail_id = last_seen_id
         total_seen = 0
-        consecutive_failures = 0
-        MAX_CONSECUTIVE_FAILURES = 5
+        events_yielded = 0
+
         visited_urls: set[str] = set()
+        visited_lock = threading.Lock()
 
-        def run_query(lp: str, fp: Optional[str]) -> Optional[str]:
-            try:
-                html = self._search(lp, fp or None, append_wildcard)
-                return html
-            except Exception as e:
-                return None
+        def update_max_from_url(url: str):
+            nonlocal max_detail_id
+            detail_id = _parse_detail_id(url)
+            if detail_id and detail_id > max_detail_id:
+                max_detail_id = detail_id
 
-        def process_links(lp: str, fp: Optional[str], links: List[str]) -> Iterable[Dict[str, Any]]:
-            nonlocal total_seen
-            print(f"[jeff] {lp} {fp or ''} → {len(links)} links")
-
-            # Concurrency controls
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-            max_workers = int(os.getenv("JEFF_DETAIL_CONCURRENCY", "8"))
-
-            def fetch_one(idx_url):
-                i, url = idx_url
+        def handle_detail(url: str) -> Optional[Dict[str, Any]]:
+            nonlocal events_yielded
+            with visited_lock:
                 if url in visited_urls:
                     return None
                 visited_urls.add(url)
-                try:
-                    r = self._sess.get(url, timeout=REQ_TIMEOUT)
-                    r.raise_for_status()
-                    detail_html = r.text
-
-                    if not _looks_like_inmate_detail(detail_html):
-                        self._audit_inc("errors", 1)
-                        return None
-
-                    rec = self._parse_detail(detail_html, r.url)
-                    if not rec:
-                        self._audit_inc("errors", 1)
-                        return None
-
-                    person = rec["person"]
-                    event = rec["event"]
-
-                    booking_category = event.get("booking_age_category", "unknown")
-                    self._audit_success(person.get("full_name", "UNKNOWN"), booking_category)
-
-                    res = self.upsert_person(person)
-                    if res.get("inserted"):
-                        self._audit_inc("upserts_person_inserted", 1)
-                    else:
-                        self._audit_inc("upserts_person_updated", 1)
-
-                    pid = res.get("_id")
-                    event["person_id"] = pid
-                    self._audit_inc("details_parsed_ok", 1)
-                    self._audit_inc("events_yielded", 1)
-                    return event
-                except Exception as e:
+            detail_id = _parse_detail_id(url) or "unknown"
+            try:
+                r = self._sess.get(url, timeout=REQ_TIMEOUT)
+                if r.status_code == 404:
+                    _snapshot_detail_failure(str(detail_id), r.text)
+                    return None
+                r.raise_for_status()
+                detail_html = r.text
+                if _is_no_results_page(detail_html):
+                    return None
+                if not _looks_like_inmate_detail(detail_html):
                     self._audit_inc("errors", 1)
+                    _snapshot_detail_failure(str(detail_id), detail_html)
+                    return None
+                rec = self._parse_detail(detail_html, r.url)
+                if not rec:
+                    self._audit_inc("errors", 1)
+                    _snapshot_detail_failure(str(detail_id), detail_html)
                     return None
 
+                person = rec["person"]
+                event = rec["event"]
+                booking_category = event.get("booking_age_category", "unknown")
+                self._audit_success(person.get("full_name", "UNKNOWN"), booking_category)
+
+                res = self.upsert_person(person)
+                if res.get("inserted"):
+                    self._audit_inc("upserts_person_inserted", 1)
+                else:
+                    self._audit_inc("upserts_person_updated", 1)
+
+                pid = res.get("_id")
+                event["person_id"] = pid
+                self._audit_inc("details_parsed_ok", 1)
+                self._audit_inc("events_yielded", 1)
+                update_max_from_url(r.url)
+                events_yielded += 1
+                return event
+            except Exception as exc:
+                self._audit_inc("errors", 1)
+                print(f"[jeff] Detail fetch error for {url}: {exc}")
+                body = ""
+                if hasattr(exc, "response") and getattr(exc.response, "text", None):
+                    body = exc.response.text
+                else:
+                    try:
+                        body = self._sess.get(url, timeout=REQ_TIMEOUT).text
+                    except Exception:
+                        body = ""
+                _snapshot_detail_failure(str(detail_id), body)
+                return None
+
+        def process_links(last_name: str, first_prefix: Optional[str], links: List[str]) -> Iterable[Dict[str, Any]]:
+            nonlocal total_seen
+            if not links:
+                return
+            print(f"[jeff] {last_name} {first_prefix or ''} → {len(links)} links")
             total_seen += len(links)
+
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            max_workers = int(os.getenv("JEFF_DETAIL_CONCURRENCY", "8"))
+
             with ThreadPoolExecutor(max_workers=max_workers) as ex:
-                futures = [ex.submit(fetch_one, (i, url)) for i, url in enumerate(links, 1) if url not in visited_urls]
+                futures = [ex.submit(handle_detail, url) for url in links]
                 for fut in as_completed(futures):
                     ev = fut.result()
                     if ev is not None:
                         yield ev
 
-            # Optional pacing between batches
             if ROW_DELAY > 0:
                 time.sleep(ROW_DELAY)
 
-        def adaptive_scan(lp: str, fp_list: List[str]) -> Iterable[Dict[str, Any]]:
-            nonlocal consecutive_failures, total_seen
-            for fp in fp_list:
-                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                    print(f"[jeff] Stopping due to {consecutive_failures} consecutive failures")
-                    return
+        def run_query(last_name: str, first_prefix: Optional[str]) -> Optional[str]:
+            try:
+                return self._search(last_name, first_prefix or None, append_wildcard)
+            except Exception:
+                return None
 
-                self._audit_inc("prefixes_scanned", 1)
-                html = run_query(lp, fp or None)
-                if html is None:
-                    consecutive_failures += 1
-                    print(f"[jeff] Search error #{consecutive_failures} for {lp}/{fp or ''}")
-                    self._audit_inc("errors", 1)
-                    if SEARCH_DELAY > 0:
-                        time.sleep(SEARCH_DELAY)
+        def perform_search(last_name: str, first_prefix: Optional[str]) -> Optional[str]:
+            self._audit_inc("prefixes_scanned", 1)
+            html = run_query(last_name, first_prefix)
+            if html is None:
+                print(f"[jeff] Failed search for last={last_name} first={first_prefix or ''}")
+                self._audit_inc("errors", 1)
+                return None
+            _write_snapshot("search", f"{last_name}_{first_prefix or 'NONE'}", html)
+            return html
+
+        def scan_last_name(last_name: str) -> Iterable[Dict[str, Any]]:
+            html = perform_search(last_name, None)
+            if html is None or "No results found" in html:
+                return
+
+            links = _extract_detail_links(html)
+            self._audit_inc("detail_links_found", len(links))
+            too_many = bool(re.search(r"too many|narrow your search", html, re.I))
+
+            if links and not too_many and len(links) <= MAX_RESULTS_PER_PREFIX:
+                for ev in process_links(last_name, None, links):
+                    yield ev
+                return
+
+            for fp in split_first_prefixes:
+                html_fp = perform_search(last_name, fp)
+                if html_fp is None or "No results found" in html_fp:
                     continue
-
-                consecutive_failures = 0
-                _write_snapshot("search", f"{lp}_{fp or 'NONE'}", html)
-
-                if "No results found" in html:
-                    print(f"[jeff] No results for last={lp}, first={fp or ''}")
-                    if SEARCH_DELAY > 0:
-                        time.sleep(SEARCH_DELAY)
-                    continue
-
-                links = _extract_detail_links(html)
-                self._audit_inc("detail_links_found", len(links))
-
-                if len(links) > MAX_RESULTS_PER_PREFIX:
-                    # Subdivide first-name prefixes A-M / N-Z (or finer A-Z if needed)
-                    print(f"[jeff] {len(links)} links > cap {MAX_RESULTS_PER_PREFIX}; subdividing first-name prefixes…")
-                    sub_fp = []
-                    if fp and len(fp) == 1:
-                        # Already at single-letter; split further into A-M/N-Z second letter
-                        sub_fp = [fp + chr(c) for c in range(ord('A'), ord('Z') + 1)]
-                    else:
-                        # Split into single-letter A..Z
-                        sub_fp = [chr(c) for c in range(ord('A'), ord('Z') + 1)]
-                    for ev in adaptive_scan(lp, sub_fp):
+                links_fp = _extract_detail_links(html_fp)
+                self._audit_inc("detail_links_found", len(links_fp))
+                if links_fp:
+                    for ev in process_links(last_name, fp, links_fp):
                         yield ev
-                    if SEARCH_DELAY > 0:
-                        time.sleep(SEARCH_DELAY)
-                    continue
 
-                total_seen += len(links)
-                for ev in process_links(lp, fp, links):
+        def probe_new_ids(start_id: int) -> Iterable[Dict[str, Any]]:
+            nonlocal total_seen
+            misses = 0
+            current = max(start_id + 1, 1)
+            upper = current + JEFF_NEW_ID_WINDOW - 1
+            while current <= upper and misses < JEFF_NEW_ID_MISS_LIMIT:
+                url = f"{BASE}/Search/Detail/{current}"
+                ev = handle_detail(url)
+                total_seen += 1
+                if ev is not None:
+                    misses = 0
+                    yield ev
+                else:
+                    misses += 1
+                current += 1
+                if SEARCH_DELAY > 0:
+                    time.sleep(min(SEARCH_DELAY, 0.5))
+
+        for ev in probe_new_ids(last_seen_id):
+            yield ev
+
+        if not JEFF_FORCE_RUN and current_last_updated and last_seen_stamp and current_last_updated == last_seen_stamp and events_yielded == 0:
+            print(f"[jeff] Last updated unchanged ({current_last_updated}); skipping surname sweep.")
+        else:
+            for surname in surnames:
+                for ev in scan_last_name(surname):
                     yield ev
 
-                if SEARCH_DELAY > 0:
-                    time.sleep(SEARCH_DELAY)
+        self._audit_finish(summary_seen_links=total_seen, last_updated=current_last_updated or "unknown")
 
-        for lp in last_prefixes:
-            print(f"[jeff] Processing last-prefix = {lp}")
-            # Site requires both fields; scan using first-name prefixes (with adaptive subdivision inside)
-            for ev in adaptive_scan(lp, first_prefixes):
-                yield ev
+        if state_coll is not None:
+            try:
+                state_coll.update_one(
+                    {"_id": STATE_DOC_ID},
+                    {
+                        "$set": {
+                            "max_detail_id": max_detail_id,
+                            "last_updated": current_last_updated,
+                            "updated_at": datetime.utcnow().isoformat() + "Z",
+                        }
+                    },
+                    upsert=True,
+                )
+            except Exception as exc:
+                print(f"[jeff] Warning: could not update ingest state: {exc}")
 
         print(f"[jeff] COMPLETED: {total_seen} detail pages processed")
-        self._audit_finish(summary_seen_links=total_seen)
