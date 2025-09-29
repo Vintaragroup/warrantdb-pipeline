@@ -10,6 +10,7 @@ SCRAPER_SPECS = {
     "brazoria_jail":       "ingestion.brazoria_jail:BrazoriaJailScraper",
     "fortbend_jail":       "ingestion.fortbend_jail:FortBendJailScraper",
     "jefferson_jail":      "ingestion.jefferson_jail:JeffersonJailScraper",
+    "harris_email_roster": "ingestion.harris_email_roster:HarrisEmailRosterImporter",
 }
 
 def _load_scraper_class(source: str):

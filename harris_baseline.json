@@ -1,0 +1,51 @@
+{
+  "booking_date_format_counts": {
+    "empty": 0,
+    "iso_yyyy_mm_dd": 4097,
+    "mm_dd_yyyy": 0,
+    "other": 0
+  },
+  "candidate_date_fields": [
+    "booking_date",
+    "booking_date_iso",
+    "file_date",
+    "first_seen_file_date",
+    "last_seen_file_date",
+    "arrest_date",
+    "arrest_datetime",
+    "scraped_at",
+    "fetched_at"
+  ],
+  "county": "harris",
+  "earliest_date": "2025-08-21",
+  "fallback_presence": {
+    "arrest_date": 0,
+    "arrest_datetime": 0,
+    "fetched_at": 0,
+    "file_date": 0,
+    "first_seen_file_date": 0,
+    "last_seen_file_date": 0,
+    "scraped_at": 4097
+  },
+  "generated_at": "2025-09-25T15:29:56.834332+00:00",
+  "latest_date": "2025-09-25",
+  "limit_applied": null,
+  "recent_windows": {
+    "last_1d": 230,
+    "last_2d": 446,
+    "last_30d": 2834,
+    "last_3d": 685,
+    "last_7d": 1174
+  },
+  "time_bucket_counts": {
+    "0_to_30_days": 8,
+    "24_hours_or_less": 3368,
+    "31_to_60_days": 721
+  },
+  "totals": {
+    "booking_date_iso_present": 0,
+    "booking_date_present": 4097,
+    "time_bucket_present": 4097,
+    "total_docs": 4097
+  }
+}

@@ -280,6 +280,132 @@ def postprocess_simple_doc(doc: Dict[str, Any], county: str, debug: bool = False
     if debug and os.environ.get("DEBUG_MAP"):
         print(f"[POST-CLEAN] anchor_changed={anchor_changed} bond_changed={bond_changed} bucket_changed={bucket_changed} label={label}")
 
+    # --- FEATURE FLAG: booking datetime derivation & time_bucket_v2 ---
+    # Controlled by env vars so we can safely roll out in stages.
+    if os.environ.get("ENABLE_BOOKING_DERIVE"):
+        _maybe_derive_booking_datetime(doc, debug)
+    if os.environ.get("ENABLE_TIME_BUCKET_V2"):
+        _maybe_compute_time_bucket_v2(doc, debug)
+
+
+# ------------------ New Derivation Helpers (feature-flagged) ------------------
+
+def _parse_dt_any(val: str) -> Optional[datetime]:
+    if not val or not isinstance(val, str):
+        return None
+    s = val.strip()
+    if not s:
+        return None
+    try:
+        # Normalize 'Z' to +00:00 for fromisoformat
+        if s.endswith('Z') and '+' not in s:
+            s = s[:-1] + '+00:00'
+        dtv = datetime.fromisoformat(s)
+        if dtv.tzinfo is None:
+            dtv = dtv.replace(tzinfo=timezone.utc)
+        return dtv.astimezone(timezone.utc)
+    except Exception:
+        # Try YYYY-MM-DD fallback
+        if len(s) == 10 and s[4] == '-' and s[7] == '-':
+            try:
+                return datetime(int(s[0:4]), int(s[5:7]), int(s[8:10]), tzinfo=timezone.utc)
+            except Exception:
+                return None
+    return None
+
+
+def _maybe_derive_booking_datetime(doc: Dict[str, Any], debug: bool = False) -> None:
+    """Populate booking_datetime / booking_date_v2 derivation fields if missing.
+    Precedence (first non-null parsable):
+      first_seen_at -> updated_at -> booking_date (legacy day only)
+    This does NOT overwrite existing booking_date. Adds:
+      booking_datetime (ISO8601 Z)
+      booking_date_v2 (YYYY-MM-DD)
+      booking_derivation_source
+    """
+    if doc.get("booking_datetime"):
+        return  # already derived
+
+    sources = [
+        ("first_seen_at", doc.get("first_seen_at")),
+        ("updated_at", doc.get("updated_at")),
+        ("legacy_booking_date", doc.get("booking_date")),
+    ]
+    chosen_src = None
+    chosen_dt: Optional[datetime] = None
+    for name, raw in sources:
+        dtv = _parse_dt_any(raw) if raw else None
+        if dtv:
+            # If the source was a legacy date (day only), dtv time = 00:00:00Z
+            chosen_src = name
+            chosen_dt = dtv
+            break
+
+    if not chosen_dt:
+        if debug:
+            print("[DERIVE] No booking_datetime derivation source found")
+        return
+
+    # Guard against future anomaly (>12h ahead of now)
+    now = datetime.now(timezone.utc)
+    if chosen_dt - now > timedelta(hours=12):  # type: ignore
+        # Tag anomaly but still record (could indicate clock skew)
+        tags = doc.get("tags") or []
+        if "future_date_candidate" not in tags:
+            tags.append("future_date_candidate")
+        doc["tags"] = tags
+
+    doc["booking_datetime"] = chosen_dt.replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+    doc["booking_derivation_source"] = chosen_src
+    doc["booking_date_v2"] = chosen_dt.date().isoformat()
+    if debug:
+        print(f"[DERIVE] booking_datetime set from {chosen_src}: {doc['booking_datetime']}")
+
+
+from datetime import timedelta  # placed after helper definitions above for clarity
+
+
+def _maybe_compute_time_bucket_v2(doc: Dict[str, Any], debug: bool = False) -> None:
+    """Compute time_bucket_v2 using booking_datetime if available.
+    Bucket design (collapsed after 60d):
+        <24h          -> 0_24h
+        24-48h        -> 24_48h
+        48-72h        -> 48_72h
+        72h-7d        -> 3d_7d
+        7d-30d        -> 7d_30d
+        30d-60d       -> 30d_60d
+        60d+          -> 60d_plus
+    """
+    if doc.get("time_bucket_v2"):
+        return  # already computed
+    bdt = doc.get("booking_datetime")
+    if not bdt:
+        return
+    dtv = _parse_dt_any(bdt)
+    if not dtv:
+        return
+    now = datetime.now(timezone.utc)
+    delta = now - dtv
+    hours = delta.total_seconds() / 3600.0
+    days = delta.total_seconds() / 86400.0
+    if hours < 24:
+        bucket = "0_24h"
+    elif hours < 48:
+        bucket = "24_48h"
+    elif hours < 72:
+        bucket = "48_72h"
+    elif hours < 24*7:
+        bucket = "3d_7d"
+    elif days < 30:
+        bucket = "7d_30d"
+    elif days < 60:
+        bucket = "30d_60d"
+    else:
+        bucket = "60d_plus"
+    doc["time_bucket_v2"] = bucket
+    if debug:
+        print(f"[DERIVE] time_bucket_v2={bucket} (hours={hours:.1f})")
+
 
 # ------------------ Main ------------------
 

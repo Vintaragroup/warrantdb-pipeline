@@ -9,3 +9,5 @@ beautifulsoup4==4.12.3
 lxml==5.3.0
 PyYAML==6.0.2
 # Optional if you will use headless browser scraping
+openpyxl==3.1.5
+xlrd==2.0.1
