@@ -115,6 +115,12 @@ fields:
     transforms:
       - digits_prefix
 
+  # Expose SPN to enable linkage to persons/enrichment
+  spn:
+    from: spn
+    transforms:
+      - strip_whitespace
+
   charge:
     from: offense
 
@@ -160,6 +166,12 @@ fields:
       - const: null
   tags:
     const: []          # empty list for parity; we can enrich later
+
+  # --- Address (from raw feed) ---
+  # Copy through the structured address from the raw Harris rows so the FE/API can display it.
+  # Shape example: { line1, city, state, zip, phone? }
+  address:
+    from: address
 
   # --- DEBUG surfaced fields (remove once verified) ---
   dbg_sex_code:

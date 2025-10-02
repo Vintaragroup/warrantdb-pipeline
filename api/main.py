@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Query
-from typing import Optional
+from typing import Optional, List, Dict, Any
 from storage.mongo_client import get_db
 from pydantic import BaseModel
 from datetime import datetime
@@ -175,4 +175,73 @@ def simple_harris_summary():
         "by_bucket_v2": buckets,
         "windows": windows,
         "coverage": coverage,
+    }
+
+
+@app.get("/simple/harris/inmates")
+def simple_harris_inmates(
+    bucket_v2: Optional[str] = Query(default=None, description="Filter by time_bucket_v2 (e.g., 0_24h, 7d_30d)"),
+    limit: int = Query(default=200, ge=1, le=1000),
+    skip: int = Query(default=0, ge=0),
+    sort: Optional[str] = Query(default="-booking_datetime", description="Sort field; prefix '-' for desc"),
+):
+    """
+    Return a list of normalized Harris inmate rows from simple_harris for frontend consumption.
+    Includes the address field carried from the raw feeds.
+    """
+    db = get_db()
+    coll = db["simple_harris"]
+
+    q: Dict[str, Any] = {"county": "harris"}
+    if bucket_v2:
+        q["time_bucket_v2"] = bucket_v2
+
+    # Determine sort
+    sort_field = "booking_datetime"
+    direction = -1
+    if sort:
+        if sort.startswith("-"):
+            sort_field = sort[1:]
+            direction = -1
+        elif sort.startswith("+"):
+            sort_field = sort[1:]
+            direction = 1
+        else:
+            sort_field = sort
+            direction = 1
+
+    projection = {
+        "_id": 0,
+        # identity
+        "county": 1,
+        "category": 1,
+        "case_number": 1,
+        "anchor": 1,
+        # display
+        "full_name": 1,
+        "charge": 1,
+        "status": 1,
+        # bond
+        "bond_amount": 1,
+        "bond_label": 1,
+        # booking & buckets
+        "booking_datetime": 1,
+        "booking_date_v2": 1,
+        "time_bucket_v2": 1,
+        # address passthrough
+        "address": 1,
+        # optional helpful fields
+        "tags": 1,
+        "normalized_at": 1,
+    }
+
+    docs: List[Dict[str, Any]] = list(
+        coll.find(q, projection).sort([(sort_field, direction)]).skip(skip).limit(limit)
+    )
+
+    return {
+        "count": len(docs),
+        "skip": skip,
+        "limit": limit,
+        "items": docs,
     }
