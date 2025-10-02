@@ -115,3 +115,64 @@ def harris_summary():
             "needs_bond_help": needs_help,
         }
     return {"date": today, "collections": out}
+
+
+@app.get("/simple/harris/summary")
+def simple_harris_summary():
+    """
+    Summary for simple_harris using canonical v2 buckets.
+
+    Returns:
+      - by_bucket_v2: array of { _id: bucket, count }
+      - windows: 24h/48h/72h/7d/30d rollups using v2 buckets
+      - coverage: total docs and fraction with booking_datetime and time_bucket_v2
+    """
+    db = get_db()
+    coll = db["simple_harris"]
+
+    # Coverage
+    total = coll.count_documents({})
+    with_bdt = coll.count_documents({"booking_datetime": {"$exists": True}})
+    with_tbv2 = coll.count_documents({"time_bucket_v2": {"$exists": True}})
+
+    # Counts by bucket v2
+    buckets = list(coll.aggregate([
+        {"$group": {"_id": {"$ifNull": ["$time_bucket_v2", "missing"]}, "count": {"$sum": 1}}},
+        {"$sort": {"count": -1}}
+    ]))
+
+    # Map to rollup windows
+    def get(bname: str) -> int:
+        for b in buckets:
+            if b.get("_id") == bname:
+                return int(b.get("count", 0))
+        return 0
+
+    b_0_24 = get("0_24h")
+    b_24_48 = get("24_48h")
+    b_48_72 = get("48_72h")
+    b_3_7 = get("3d_7d")
+    b_7_30 = get("7d_30d")
+    b_30_60 = get("30d_60d")
+    b_60_plus = get("60d_plus")
+
+    windows = {
+        "24h": b_0_24,
+        "48h": b_24_48,
+        "72h": b_48_72,
+        "7d": b_0_24 + b_24_48 + b_48_72 + b_3_7,
+        "30d": b_0_24 + b_24_48 + b_48_72 + b_3_7 + b_7_30,
+    }
+
+    coverage = {
+        "total": total,
+        "pct_booking_datetime": (with_bdt / total) if total else None,
+        "pct_time_bucket_v2": (with_tbv2 / total) if total else None,
+    }
+
+    return {
+        "date": datetime.utcnow().isoformat() + "Z",
+        "by_bucket_v2": buckets,
+        "windows": windows,
+        "coverage": coverage,
+    }

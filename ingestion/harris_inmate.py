@@ -32,7 +32,7 @@ def _normalize_date_token(value: str | None) -> dt.date | None:
     if not value:
         return None
     value = value.strip()
-    for fmt in ("%Y-%m-%d", "%m-%d-%y", "%m/%d/%Y", "%m/%d/%y"):
+    for fmt in ("%Y-%m-%d", "%m-%d-%y", "%m/%d/%Y", "%m/%d/%y", "%Y%m%d"):
         try:
             return dt.datetime.strptime(value, fmt).date()
         except ValueError:
@@ -69,12 +69,23 @@ def _needs_bond_help(bond_amount: int | None, bond_note: str | None) -> bool:
     return True
 
 def _fetch_text(url: str) -> str:
-    r = requests.get(url, timeout=60)
+    # Use a browser-like UA/Accept to avoid servers returning HTML wrappers
+    headers = {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
+        "Accept": "text/plain, text/csv, */*;q=0.8",
+    }
+    r = requests.get(url, timeout=60, headers=headers)
     r.raise_for_status()
     return r.content.decode("utf-8", errors="replace")
 
 def _parse_rows(text: str) -> List[List[str]]:
     out = []
+    # quick guard: if the content looks like HTML or an error page, return empty
+    lower = text[:2048].lower()
+    if ("<html" in lower or "<!doctype" in lower or "<body" in lower
+        or "server error" in lower or "stack trace" in lower or "system.web" in lower):
+        return out
+    # Try comma first; if few rows produced later, caller validation will guard.
     reader = csv.reader(io.StringIO(text), delimiter=",")
     for row in reader:
         row = [x.strip() for x in row]
@@ -83,6 +94,37 @@ def _parse_rows(text: str) -> List[List[str]]:
         if any(c for c in row):
             out.append(row)
     return out
+
+def _looks_like_dataset(text: str, kind: str) -> bool:
+    """Heuristic validation to ensure we didn't fetch an HTML/error page.
+    We expect comma-separated lines with multiple fields and no HTML tags.
+    """
+    if not text:
+        return False
+    head = text[:4096].lower()
+    if "<html" in head or "<!doctype" in head or "<body" in head:
+        return False
+    if "system.web" in head or "server error" in head or "stack trace" in head:
+        return False
+    # Consider more head lines to tolerate headers/banners
+    lines = [ln for ln in text.splitlines() if ln.strip()][:50]
+    if len(lines) < 2:
+        return False
+    # Accept common delimiters: comma, semicolon, pipe, tab
+    seps = [",", ";", "|", "\t"]
+    def _fields(ln: str) -> int:
+        for s in seps:
+            if s in ln:
+                return len(ln.split(s))
+        return 1
+    # require at least two data-like lines containing a known separator
+    sep_lines = sum(1 for ln in lines if any(s in ln for s in seps))
+    if sep_lines < 2:
+        return False
+    # minimal sanity: at least one line should have >= 6 fields using any separator
+    if not any(_fields(ln) >= 6 for ln in lines):
+        return False
+    return True
 
 # --- Enhanced booking categorization ---
 def _calculate_booking_age_category(file_date_iso: str) -> str:
@@ -422,11 +464,27 @@ def _discover_latest_paths_from_page() -> Dict[str, str]:
 
     html = _fetch_text(PAGE_URL)
     candidates = _collect_candidate_paths(html)
+    if _env("HARRIS_DISCOVERY_DEBUG", "0") == "1":
+        sample = sorted(list(candidates))[:20]
+        print(f"[harris] discovery: candidates={len(candidates)} sample={sample}")
 
     latest: Dict[str, str] = {}
 
+    def _kind_matches(suffix: str, target: str) -> bool:
+        s = re.sub(r"[^a-z]", "", suffix.lower())
+        t = re.sub(r"[^a-z]", "", target.lower())
+        if t == "bond":
+            return "bond" in s
+        if t == "misfel":
+            # accept common variants
+            return any(x in s for x in ("misfel", "mis", "misdemeanor"))
+        if t == "nafiling":
+            return ("nafiling" in s) or ("filing" in s and s.startswith("na"))
+        return s == t
+
     def pick_latest(match_group: str, kind: str) -> str | None:
-        pattern = re.compile(rf"^{match_group}/(\d{{2}}-\d{{2}}-\d{{2}})-{kind}\.txt$", re.I)
+        # Accept various kind suffix variants (e.g., na_filing, MIS)
+        pattern = re.compile(rf"^{match_group}/(\d{{2}}-\d{{2}}-\d{{2}})-([A-Za-z_]+)\.txt$", re.I)
         best_path = None
         best_date = None
         for cand in candidates:
@@ -434,6 +492,9 @@ def _discover_latest_paths_from_page() -> Dict[str, str]:
             if not m:
                 continue
             date_str = m.group(1)
+            suffix = m.group(2)
+            if not _kind_matches(suffix, kind):
+                continue
             try:
                 dt_obj = dt.datetime.strptime(date_str, "%m-%d-%y")
             except ValueError:
@@ -466,12 +527,91 @@ def _discover_latest_paths_from_page() -> Dict[str, str]:
             except Exception as exc:
                 print(f"[harris] Failed to parse HARRIS_PATH_OVERRIDES: {exc}")
 
+    # Fallback 1: Synthesize expected rel paths for recent days if page format changed
+    if missing:
+        def _fmt_mm_dd_yy(d: dt.date) -> str:
+            return d.strftime("%m-%d-%y")
+
+        def _probe_exists(rel_path: str) -> bool:
+            url = f"{FILES_BASE}/{rel_path}"
+            try:
+                # Try HEAD first
+                head = requests.head(url, timeout=15, allow_redirects=True)
+                if 200 <= head.status_code < 300:
+                    return True
+            except Exception:
+                pass
+            try:
+                # Fallback to small GET (server may not support HEAD)
+                resp = requests.get(url, timeout=25, stream=True)
+                ok = 200 <= resp.status_code < 300
+                # Close immediately; caller will re-download later as text
+                resp.close()
+                return ok
+            except Exception:
+                return False
+
+        days_back = int(_env("HARRIS_FALLBACK_DAYS", "3") or "3")
+        # Only attempt synthesis if not explicitly disabled
+        if _env("HARRIS_DISABLE_SYNTH_FALLBACK", "0") != "1":
+            today = dt.date.today()
+            for key in list(missing):
+                try:
+                    group, kind = key.split("/")
+                except ValueError:
+                    continue
+                picked_rel = None
+                for delta in range(0, max(0, days_back) + 1):
+                    d = today - dt.timedelta(days=delta)
+                    rel = f"{group}/{_fmt_mm_dd_yy(d)}-{kind}.txt"
+                    if _probe_exists(rel):
+                        picked_rel = rel
+                        break
+                if picked_rel:
+                    latest[key] = picked_rel
+            # recompute missing after synthesis
+            missing = [k for k in want if k not in latest]
+
+    # Fallback 2: Page lists only YYYYMMDD.txt daily dumps; use the newest for all missing keys
+    if missing:
+        dates_only = []
+        date_re = re.compile(r"^(?:Civil|Criminal)?/?(\d{8})\.txt$", re.I)
+        for cand in candidates:
+            m = date_re.match(cand)
+            if m:
+                dates_only.append(m.group(1))
+            else:
+                # Also consider bare '20250930.txt' with no prefix
+                m2 = re.match(r"^(\d{8})\.txt$", cand)
+                if m2:
+                    dates_only.append(m2.group(1))
+        if dates_only:
+            # pick the latest YYYYMMDD
+            best = None
+            best_dt = None
+            for dstr in set(dates_only):
+                try:
+                    d = dt.datetime.strptime(dstr, "%Y%m%d").date()
+                except Exception:
+                    continue
+                if best_dt is None or d > best_dt:
+                    best_dt = d
+                    best = dstr
+            if best:
+                # Use the bare filename as exposed by the site, e.g., '20251001.txt'
+                synthetic_rel = f"{best}.txt"
+                for key in list(missing):
+                    latest[key] = synthetic_rel
+                missing = [k for k in want if k not in latest]
+
     if missing:
         raise RuntimeError(
             "Could not discover latest datasets from page. Missing: "
-            f"{missing}. Candidates found: {sorted(candidates)[:10]}"
+            f"{missing}. Candidates found: {sorted(candidates)[:10]}. "
+            "You can set HARRIS_PATH_OVERRIDES as JSON or increase HARRIS_FALLBACK_DAYS."
         )
-
+    if _env("HARRIS_DISCOVERY_DEBUG", "0") == "1":
+        print(f"[harris] discovery: latest={latest}")
     return latest
 
 def _fetch_six_files_latest() -> Dict[str, str]:
@@ -486,18 +626,27 @@ def _fetch_six_files_latest() -> Dict[str, str]:
 
     for key, rel in rels.items():
         direct_url = f"{FILES_BASE}/{rel}"
+        kind = key.split("/")[-1].lower()
 
-        # 1) try direct
+        # 1) try direct (preferred)
         txt = None
         try:
             txt = _fetch_text(direct_url)
         except Exception:
             txt = None  # swallow; we'll try WebForms
 
-        if txt is None:
-            # 2) fall back to WebForms click
+        # If direct returned but content doesn't look like expected dataset, treat as failure
+        if txt is not None and not _looks_like_dataset(txt, kind):
+            txt = None
+
+        # If the rel is a bare YYYYMMDD.txt (date-only), WebForms likely can't fetch it; skip WebForms
+        is_date_only = bool(re.match(r"^\d{8}\.txt$", rel))
+        if txt is None and not is_date_only:
+            # 2) fall back to WebForms click (for per-kind files)
             try:
                 txt = _download_via_webforms(sess, rel)
+                if not _looks_like_dataset(txt, kind):
+                    raise RuntimeError("Downloaded content did not look like expected CSV/text dataset")
             except Exception as e:
                 raise RuntimeError(f"Failed to fetch {key} via direct and WebForms: rel={rel}") from e
 
@@ -551,8 +700,16 @@ def run_harris_ingest(file_date_iso: str | None = None) -> Dict[str, Dict[str, L
 
     # Pull out filename dates like "08-21-25" per key for idempotence check.
     def _fname_date(source_url: str) -> str | None:
+        # mm-dd-yy style
         m = re.search(r"/(\d{2}-\d{2}-\d{2})-", source_url)
-        return m.group(1) if m else None
+        if m:
+            return m.group(1)
+        # YYYYMMDD.txt style
+        # accept with or without preceding slash
+        m2 = re.search(r"(?:/|^)(\d{8})\.txt$", source_url)
+        if m2:
+            return m2.group(1)
+        return None
 
     latest_by_key = {key: _fname_date(url) for key, url in urls_by_key.items()}
 
@@ -579,15 +736,19 @@ def run_harris_ingest(file_date_iso: str | None = None) -> Dict[str, Dict[str, L
     stale_keys = []
     today_file_date = file_date
     today_date_obj = run_date_obj
+    allow_stale = (_env("HARRIS_ALLOW_STALE", "0") == "1")
+    max_stale_days = int(_env("HARRIS_STALE_MAX_DAYS", "1") or "1")
     for g in GROUPS:
         for kind in KINDS:
             key = f"{g}/{kind}"
             file_key_date = latest_by_key.get(key)
             key_date_obj = _normalize_date_token(file_key_date)
+            same_day = False
             if today_date_obj and key_date_obj:
-                same_day = key_date_obj == today_date_obj
+                diff_days = abs((today_date_obj - key_date_obj).days)
+                same_day = diff_days == 0 or (allow_stale and diff_days <= max_stale_days)
             else:
-                same_day = file_key_date == today_file_date
+                same_day = (file_key_date == today_file_date)
             if not same_day:
                 print(f"[harris] SKIP {key} stale file_date={file_key_date}")
                 stale_keys.append(key)
@@ -597,7 +758,11 @@ def run_harris_ingest(file_date_iso: str | None = None) -> Dict[str, Dict[str, L
         key_bond = f"{g}/bond"
         if key_bond not in stale_keys:
             rows = _parse_rows(six[key_bond])
-            docs = parse_bond(rows, file_date, g)
+            # derive per-file date from filename date token when available
+            _fd_raw = latest_by_key.get(key_bond)
+            _fd_dt = _normalize_date_token(_fd_raw)
+            _fd_iso = _fd_dt.isoformat() if _fd_dt else file_date
+            docs = parse_bond(rows, _fd_iso, g)
             for d in docs:
                 d["source_url"] = urls_by_key[key_bond]
                 d["source_filename_date"] = latest_by_key[key_bond]
@@ -613,7 +778,10 @@ def run_harris_ingest(file_date_iso: str | None = None) -> Dict[str, Dict[str, L
         key_misfel = f"{g}/misfel"
         if key_misfel not in stale_keys:
             rows = _parse_rows(six[key_misfel])
-            docs = parse_misfel(rows, file_date, g)
+            _fd_raw = latest_by_key.get(key_misfel)
+            _fd_dt = _normalize_date_token(_fd_raw)
+            _fd_iso = _fd_dt.isoformat() if _fd_dt else file_date
+            docs = parse_misfel(rows, _fd_iso, g)
             for d in docs:
                 d["source_url"] = urls_by_key[key_misfel]
                 d["source_filename_date"] = latest_by_key[key_misfel]
@@ -627,7 +795,10 @@ def run_harris_ingest(file_date_iso: str | None = None) -> Dict[str, Dict[str, L
         key_nafiling = f"{g}/nafiling"
         if key_nafiling not in stale_keys:
             rows = _parse_rows(six[key_nafiling])
-            docs = parse_nafiling(rows, file_date, g)
+            _fd_raw = latest_by_key.get(key_nafiling)
+            _fd_dt = _normalize_date_token(_fd_raw)
+            _fd_iso = _fd_dt.isoformat() if _fd_dt else file_date
+            docs = parse_nafiling(rows, _fd_iso, g)
             for d in docs:
                 d["source_url"] = urls_by_key[key_nafiling]
                 d["source_filename_date"] = latest_by_key[key_nafiling]

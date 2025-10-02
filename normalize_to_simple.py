@@ -19,6 +19,7 @@ from typing import Any, Dict, Iterable, Optional, Tuple
 
 import yaml
 from pymongo import MongoClient
+from dotenv import load_dotenv
 
 # mapping engine (your existing modules)
 from pipeline.mapping.apply import apply_mapping
@@ -26,6 +27,10 @@ from pipeline.mapping.transforms import get_path  # for debug only
 
 import re
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+
+# Load environment from .env so MONGO_URI/MONGO_DB are available when not exported
+load_dotenv()
 
 
 # ------------------ Utils ------------------
@@ -239,13 +244,18 @@ def _normalize_bond_fields(doc: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
 
 def _ensure_time_bucket(doc: Dict[str, Any]) -> bool:
     """
-    If time_bucket missing, compute from booking_date using our standard buckets.
+    Absolute rule: compute time_bucket strictly from booking_date.
+    Ignore any existing value; do NOT fall back to ingestion time.
+    If booking_date is missing, remove time_bucket to avoid stale tags.
+    Returns True iff the document was modified.
     """
-    if doc.get("time_bucket"):
-        return False
+    changed = False
     days = _days_since(doc.get("booking_date"))
     if days is None:
-        return False
+        if "time_bucket" in doc:
+            del doc["time_bucket"]
+            changed = True
+        return changed
     if days <= 1:
         tb = "24_hours_or_less"
     elif days <= 2:
@@ -260,8 +270,10 @@ def _ensure_time_bucket(doc: Dict[str, Any]) -> bool:
         tb = "61_to_180_days"
     else:
         tb = "365_days_or_older"
-    doc["time_bucket"] = tb
-    return True
+    if doc.get("time_bucket") != tb:
+        doc["time_bucket"] = tb
+        changed = True
+    return changed
 
 
 def postprocess_simple_doc(doc: Dict[str, Any], county: str, debug: bool = False) -> None:
@@ -273,6 +285,32 @@ def postprocess_simple_doc(doc: Dict[str, Any], county: str, debug: bool = False
     bond_changed, label = _normalize_bond_fields(doc)
     bucket_changed = _ensure_time_bucket(doc)
 
+    # Compute ingest lag for observability (gap from booking_date to when we normalized)
+    # Does not affect time_bucket tags.
+    try:
+        bdt = doc.get("booking_date")
+        nat = doc.get("normalized_at")
+        if bdt and nat:
+            # parse to dates
+            # booking_date: YYYY-MM-DD
+            by, bm, bd = [int(x) for x in bdt.split("-")]
+            from datetime import datetime, timezone
+            # normalized_at may have +00:00; use fromisoformat
+            nstr = nat
+            if nstr.endswith('Z') and '+' not in nstr:
+                nstr = nstr[:-1] + '+00:00'
+            ndt = datetime.fromisoformat(nstr)
+            if ndt.tzinfo is None:
+                ndt = ndt.replace(tzinfo=timezone.utc)
+            days_delta = (ndt.date() - datetime(by, bm, bd).date()).days
+            hours_delta = days_delta * 24
+            # store as simple numbers for dashboards
+            doc["ingest_lag_days"] = max(days_delta, 0)
+            doc["ingest_lag_hours"] = max(hours_delta, 0)
+    except Exception:
+        # best effort; ignore if parsing fails
+        pass
+
     # Ensure tags array exists
     if "tags" not in doc or doc["tags"] is None:
         doc["tags"] = []
@@ -280,12 +318,10 @@ def postprocess_simple_doc(doc: Dict[str, Any], county: str, debug: bool = False
     if debug and os.environ.get("DEBUG_MAP"):
         print(f"[POST-CLEAN] anchor_changed={anchor_changed} bond_changed={bond_changed} bucket_changed={bucket_changed} label={label}")
 
-    # --- FEATURE FLAG: booking datetime derivation & time_bucket_v2 ---
-    # Controlled by env vars so we can safely roll out in stages.
-    if os.environ.get("ENABLE_BOOKING_DERIVE"):
-        _maybe_derive_booking_datetime(doc, debug)
-    if os.environ.get("ENABLE_TIME_BUCKET_V2"):
-        _maybe_compute_time_bucket_v2(doc, debug)
+    # Always derive booking_datetime/booking_date_v2 and compute time_bucket_v2
+    # using America/Chicago semantics.
+    _maybe_derive_booking_datetime(doc, debug)
+    _maybe_compute_time_bucket_v2(doc, debug)
 
 
 # ------------------ New Derivation Helpers (feature-flagged) ------------------
@@ -301,14 +337,18 @@ def _parse_dt_any(val: str) -> Optional[datetime]:
         if s.endswith('Z') and '+' not in s:
             s = s[:-1] + '+00:00'
         dtv = datetime.fromisoformat(s)
+        # Interpret naive datetimes as America/Chicago
         if dtv.tzinfo is None:
-            dtv = dtv.replace(tzinfo=timezone.utc)
+            dtv = dtv.replace(tzinfo=ZoneInfo("America/Chicago"))
+        # Return UTC for storage/computation
         return dtv.astimezone(timezone.utc)
     except Exception:
-        # Try YYYY-MM-DD fallback
+        # Try YYYY-MM-DD fallback (interpret as midnight America/Chicago)
         if len(s) == 10 and s[4] == '-' and s[7] == '-':
             try:
-                return datetime(int(s[0:4]), int(s[5:7]), int(s[8:10]), tzinfo=timezone.utc)
+                central = ZoneInfo("America/Chicago")
+                local_dt = datetime(int(s[0:4]), int(s[5:7]), int(s[8:10]), tzinfo=central)
+                return local_dt.astimezone(timezone.utc)
             except Exception:
                 return None
     return None
@@ -323,8 +363,9 @@ def _maybe_derive_booking_datetime(doc: Dict[str, Any], debug: bool = False) -> 
       booking_date_v2 (YYYY-MM-DD)
       booking_derivation_source
     """
+    # Do not overwrite an existing booking_datetime
     if doc.get("booking_datetime"):
-        return  # already derived
+        return
 
     sources = [
         ("first_seen_at", doc.get("first_seen_at")),
@@ -355,9 +396,11 @@ def _maybe_derive_booking_datetime(doc: Dict[str, Any], debug: bool = False) -> 
             tags.append("future_date_candidate")
         doc["tags"] = tags
 
-    doc["booking_datetime"] = chosen_dt.replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+    # Store booking_datetime in UTC ISO8601 Z form
+    doc["booking_datetime"] = chosen_dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
     doc["booking_derivation_source"] = chosen_src
-    doc["booking_date_v2"] = chosen_dt.date().isoformat()
+    # booking_date_v2 is the date in America/Chicago
+    doc["booking_date_v2"] = chosen_dt.astimezone(ZoneInfo("America/Chicago")).date().isoformat()
     if debug:
         print(f"[DERIVE] booking_datetime set from {chosen_src}: {doc['booking_datetime']}")
 
@@ -376,8 +419,7 @@ def _maybe_compute_time_bucket_v2(doc: Dict[str, Any], debug: bool = False) -> N
         30d-60d       -> 30d_60d
         60d+          -> 60d_plus
     """
-    if doc.get("time_bucket_v2"):
-        return  # already computed
+    # Always compute from booking_datetime when available
     bdt = doc.get("booking_datetime")
     if not bdt:
         return

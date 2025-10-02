@@ -24,6 +24,7 @@ import datetime as dt
 from typing import Dict, List, Tuple, Iterable
 
 from pymongo import MongoClient
+from dotenv import load_dotenv
 
 COUNTIES: List[str] = ["harris", "galveston", "brazoria", "fortbend", "jefferson"]
 SIMPLE_PREFIX = "simple_"              # e.g., simple_harris
@@ -32,6 +33,8 @@ REPORTS_COLL  = "reports"
 
 
 def _db():
+    # Load .env so MONGO_* are available when not exported
+    load_dotenv()
     uri = os.environ["MONGO_URI"]
     name = os.environ.get("MONGO_DB", "warrantdb")
     return MongoClient(uri)[name]
@@ -97,9 +100,15 @@ def generate_for_county(db, county: str) -> Tuple[int, int, List[Dict]]:
     cur_map: Dict[str, str] = {}
 
     # Stream through the collection (projection minimizes payload)
-    cursor = simple.find({}, projection=None, no_cursor_timeout=True)
-    try:
-        for doc in cursor:
+    # Iterate in ascending _id order with short-lived cursors to avoid Atlas tier restrictions
+    last_id = None
+    batch_size = 5000
+    while True:
+        q = {"_id": {"$gt": last_id}} if last_id is not None else {}
+        got = 0
+        for doc in simple.find(q, sort=[("_id", 1)], limit=batch_size):
+            last_id = doc.get("_id", last_id)
+            got += 1
             k = stable_key(doc)
             f = fingerprint(doc)
             cur_map[k] = f
@@ -122,8 +131,8 @@ def generate_for_county(db, county: str) -> Tuple[int, int, List[Dict]]:
                         "name": doc.get("full_name") or doc.get("name"),
                         "id": str(doc.get("_id")),
                     })
-    finally:
-        cursor.close()
+        if got < batch_size:
+            break
 
     persist_state(state, cur_map)
     return new_cnt, chg_cnt, examples
@@ -131,7 +140,7 @@ def generate_for_county(db, county: str) -> Tuple[int, int, List[Dict]]:
 
 def main() -> int:
     db = _db()
-    ts = dt.datetime.utcnow()
+    ts = dt.datetime.now(dt.timezone.utc)
 
     counties = _report_counties()
     items: List[Dict] = []

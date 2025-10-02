@@ -32,8 +32,10 @@ Exit Codes:
 from __future__ import annotations
 import os, sys, argparse
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 from typing import Optional, Dict, Any, List
 from pymongo import MongoClient, UpdateOne
+from dotenv import load_dotenv
 
 COUNTY = "harris"
 SIMPLE_COLLECTION = f"simple_{COUNTY}"
@@ -44,7 +46,8 @@ def _parse_dt_any(val: Any) -> Optional[datetime]:
     if val in (None, ""): return None
     if isinstance(val, datetime):
         if val.tzinfo is None:
-            val = val.replace(tzinfo=timezone.utc)
+            # Interpret naive as America/Chicago
+            val = val.replace(tzinfo=ZoneInfo("America/Chicago"))
         return val.astimezone(timezone.utc)
     if not isinstance(val, str):
         return None
@@ -56,14 +59,17 @@ def _parse_dt_any(val: Any) -> Optional[datetime]:
             s = s[:-1] + '+00:00'
         dtv = datetime.fromisoformat(s)
         if dtv.tzinfo is None:
-            dtv = dtv.replace(tzinfo=timezone.utc)
+            # Interpret naive strings as America/Chicago
+            dtv = dtv.replace(tzinfo=ZoneInfo("America/Chicago"))
         return dtv.astimezone(timezone.utc)
     except Exception:
         pass
     # Try YYYY-MM-DD date only
     if len(s) == 10 and s[4:5] == '-' and s[7:8] == '-':
         try:
-            return datetime(int(s[0:4]), int(s[5:7]), int(s[8:10]), tzinfo=timezone.utc)
+            central = ZoneInfo("America/Chicago")
+            local_dt = datetime(int(s[0:4]), int(s[5:7]), int(s[8:10]), tzinfo=central)
+            return local_dt.astimezone(timezone.utc)
         except Exception:
             return None
     return None
@@ -95,9 +101,9 @@ def _derive_booking_datetime(doc: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         tags = doc.get("tags") or []
         if "future_date_candidate" not in tags:
             updates["tags"] = tags + ["future_date_candidate"]
-    updates["booking_datetime"] = chosen_dt.replace(microsecond=0).isoformat().replace('+00:00','Z')
+    updates["booking_datetime"] = chosen_dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00','Z')
     updates["booking_derivation_source"] = chosen_src
-    updates["booking_date_v2"] = chosen_dt.date().isoformat()
+    updates["booking_date_v2"] = chosen_dt.astimezone(ZoneInfo("America/Chicago")).date().isoformat()
     return updates
 
 
@@ -145,6 +151,8 @@ def parse_args(argv=None):
 
 
 def main():
+    # Load .env so MONGO_* can be used without exporting
+    load_dotenv()
     args = parse_args()
     uri = os.environ.get("MONGO_URI")
     dbname = os.environ.get("MONGO_DB")
