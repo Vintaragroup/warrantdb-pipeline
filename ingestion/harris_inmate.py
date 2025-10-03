@@ -416,6 +416,7 @@ def _new_entries(col, file_date: str, window_days: int, group: str) -> List[Dict
 # ---------- Download strategy ----------
 
 def _clean_rel_path(path: str) -> str:
+    path = (path or "").strip()
     path = path.replace("\\", "/")
     path = re.sub(r"https?://[^/]+/", "", path, flags=re.I)
     path = re.sub(r"^Files/", "", path, flags=re.I)
@@ -447,8 +448,8 @@ def _collect_candidate_paths(html: str) -> set[str]:
             for match in re.findall(r"([A-Za-z0-9_\\/\-]+\.txt)", text):
                 candidates.add(_clean_rel_path(match))
 
-    # 4) plain text fallback: look for Civil/... lines
-    for match in re.findall(r"((?:Civil|Criminal)[\\\/]\d{2}-\d{2}-\d{2}-[A-Za-z]+\.txt)", html, flags=re.IGNORECASE):
+    # 4) plain text fallback: look for Civil/... lines (allow '-', '_' or space between date and suffix)
+    for match in re.findall(r"((?:Civil|Criminal)[\\\/]\d{1,2}-\d{1,2}-\d{2}[-_\s][^.]+\.txt)", html, flags=re.IGNORECASE):
         candidates.add(_clean_rel_path(match))
 
     return {c for c in candidates if c.lower().endswith('.txt')}
@@ -470,6 +471,37 @@ def _discover_latest_paths_from_page() -> Dict[str, str]:
 
     latest: Dict[str, str] = {}
 
+    # Helpers shared by synthesis passes
+    def _suffix_variants(k: str) -> list[str]:
+        k = (k or "").lower().strip()
+        if k == "bond":
+            return ["bond", "Bond", "BOND"]
+        if k == "misfel":
+            return ["misfel", "Misfel", "MISFEL", "mis", "Mis", "MIS"]
+        if k == "nafiling":
+            return ["nafiling", "NAFiling", "NaFiling", "na_filing", "NA_Filing", "NAFILING"]
+        return [k]
+
+    def _probe_exists(rel_path: str) -> bool:
+        url = f"{FILES_BASE}/{rel_path}"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
+            "Accept": "text/plain, text/csv, */*;q=0.8",
+        }
+        try:
+            head = requests.head(url, timeout=15, allow_redirects=True, headers=headers)
+            if 200 <= head.status_code < 300:
+                return True
+        except Exception:
+            pass
+        try:
+            resp = requests.get(url, timeout=25, headers=headers, stream=True)
+            ok = 200 <= resp.status_code < 300
+            resp.close()
+            return ok
+        except Exception:
+            return False
+
     def _kind_matches(suffix: str, target: str) -> bool:
         s = re.sub(r"[^a-z]", "", suffix.lower())
         t = re.sub(r"[^a-z]", "", target.lower())
@@ -483,8 +515,10 @@ def _discover_latest_paths_from_page() -> Dict[str, str]:
         return s == t
 
     def pick_latest(match_group: str, kind: str) -> str | None:
-        # Accept various kind suffix variants (e.g., na_filing, MIS)
-        pattern = re.compile(rf"^{match_group}/(\d{{2}}-\d{{2}}-\d{{2}})-([A-Za-z_]+)\.txt$", re.I)
+        # Accept various kind suffix variants and separators ('-', '_' or space) after the date.
+        # Capture any run of non-dot characters as the suffix so we can fuzzy-match kind.
+        # Allow non-zero-padded month/day (e.g., 10-3-25) as well as zero-padded.
+        pattern = re.compile(rf"^{match_group}/(\d{{1,2}}-\d{{1,2}}-\d{{2}})[-_\s]+([^.]+)\.txt$", re.I)
         best_path = None
         best_date = None
         for cand in candidates:
@@ -496,8 +530,11 @@ def _discover_latest_paths_from_page() -> Dict[str, str]:
             if not _kind_matches(suffix, kind):
                 continue
             try:
-                dt_obj = dt.datetime.strptime(date_str, "%m-%d-%y")
-            except ValueError:
+                mm_s, dd_s, yy_s = date_str.split("-")
+                mm, dd, yy = int(mm_s), int(dd_s), int(yy_s)
+                year = 2000 + yy if yy < 70 else 1900 + yy
+                dt_obj = dt.datetime(year, mm, dd)
+            except Exception:
                 continue
             if best_date is None or dt_obj > best_date:
                 best_date = dt_obj
@@ -512,6 +549,47 @@ def _discover_latest_paths_from_page() -> Dict[str, str]:
 
     want = [f"{g}/{k}" for g in GROUPS for k in KINDS]
     missing = [k for k in want if k not in latest]
+
+    # Attempt synthesis using dates we already found for any group/kind (e.g., Criminal had mm-dd-yy today)
+    if missing:
+        # Extract any mm-dd-yy tokens from already-picked rels and sort newest first
+        tokens = []
+        for rel in latest.values():
+            m = re.search(r"(\d{2}-\d{2}-\d{2})", rel)
+            if m:
+                tokens.append(m.group(1))
+        uniq_tokens = []
+        seen = set()
+        for t in tokens:
+            if t not in seen:
+                seen.add(t)
+                uniq_tokens.append(t)
+        def _tok_to_date(tok: str):
+            try:
+                return dt.datetime.strptime(tok, "%m-%d-%y").date()
+            except Exception:
+                return dt.date(1970,1,1)
+        uniq_tokens.sort(key=_tok_to_date, reverse=True)
+        # Try to synthesize missing keys for the newest tokens first
+        for key in list(missing):
+            try:
+                group, kind = key.split("/")
+            except ValueError:
+                continue
+            candidate_rel = None
+            for tok in uniq_tokens:
+                # probe common case variants as in fallback 1
+                for suf in _suffix_variants(kind):  # type: ignore[name-defined]
+                    rel = f"{group}/{tok}-{suf}.txt"
+                    if _probe_exists(rel):  # type: ignore[name-defined]
+                        candidate_rel = rel
+                        break
+                if candidate_rel:
+                    break
+            if candidate_rel:
+                latest[key] = candidate_rel
+        # recompute missing after synthesis
+        missing = [k for k in want if k not in latest]
 
     if missing:
         # allow manual override via JSON env mapping
@@ -532,26 +610,18 @@ def _discover_latest_paths_from_page() -> Dict[str, str]:
         def _fmt_mm_dd_yy(d: dt.date) -> str:
             return d.strftime("%m-%d-%y")
 
-        def _probe_exists(rel_path: str) -> bool:
-            url = f"{FILES_BASE}/{rel_path}"
-            try:
-                # Try HEAD first
-                head = requests.head(url, timeout=15, allow_redirects=True)
-                if 200 <= head.status_code < 300:
-                    return True
-            except Exception:
-                pass
-            try:
-                # Fallback to small GET (server may not support HEAD)
-                resp = requests.get(url, timeout=25, stream=True)
-                ok = 200 <= resp.status_code < 300
-                # Close immediately; caller will re-download later as text
-                resp.close()
-                return ok
-            except Exception:
-                return False
-
         days_back = int(_env("HARRIS_FALLBACK_DAYS", "3") or "3")
+
+        def _suffix_variants(k: str) -> list[str]:
+            k = k.lower().strip()
+            if k == "bond":
+                return ["bond", "Bond", "BOND"]
+            if k == "misfel":
+                # try common variants some publishers use
+                return ["misfel", "Misfel", "MISFEL", "mis", "Mis", "MIS"]
+            if k == "nafiling":
+                return ["nafiling", "NAFiling", "NaFiling", "na_filing", "NA_Filing"]
+            return [k]
         # Only attempt synthesis if not explicitly disabled
         if _env("HARRIS_DISABLE_SYNTH_FALLBACK", "0") != "1":
             today = dt.date.today()
@@ -563,9 +633,15 @@ def _discover_latest_paths_from_page() -> Dict[str, str]:
                 picked_rel = None
                 for delta in range(0, max(0, days_back) + 1):
                     d = today - dt.timedelta(days=delta)
-                    rel = f"{group}/{_fmt_mm_dd_yy(d)}-{kind}.txt"
-                    if _probe_exists(rel):
-                        picked_rel = rel
+                    date_token = _fmt_mm_dd_yy(d)
+                    found = False
+                    for suf in _suffix_variants(kind):
+                        rel = f"{group}/{date_token}-{suf}.txt"
+                        if _probe_exists(rel):
+                            picked_rel = rel
+                            found = True
+                            break
+                    if found:
                         break
                 if picked_rel:
                     latest[key] = picked_rel
@@ -605,11 +681,9 @@ def _discover_latest_paths_from_page() -> Dict[str, str]:
                 missing = [k for k in want if k not in latest]
 
     if missing:
-        raise RuntimeError(
-            "Could not discover latest datasets from page. Missing: "
-            f"{missing}. Candidates found: {sorted(candidates)[:10]}. "
-            "You can set HARRIS_PATH_OVERRIDES as JSON or increase HARRIS_FALLBACK_DAYS."
-        )
+        # Do not fail hard if some keys are missing (often Civil isn't updated daily).
+        # We'll proceed with whatever we have, prioritizing Criminal.
+        print(f"[harris] WARN: discovery missing keys {missing}; proceeding with available datasets.")
     if _env("HARRIS_DISCOVERY_DEBUG", "0") == "1":
         print(f"[harris] discovery: latest={latest}")
     return latest
@@ -649,10 +723,11 @@ def _fetch_six_files_latest() -> Dict[str, str]:
                     raise RuntimeError("Downloaded content did not look like expected CSV/text dataset")
             except Exception as e:
                 raise RuntimeError(f"Failed to fetch {key} via direct and WebForms: rel={rel}") from e
-        # If still no content, raise with a helpful hint rather than returning None
+        # If still no content, warn and skip this key (common for Civil on non-update days)
         if txt is None:
             hint = " (date-only filename; direct download failed)" if is_date_only else ""
-            raise RuntimeError(f"Failed to fetch {key}: rel={rel}{hint}. No valid content retrieved.")
+            print(f"[harris] WARN: no content for {key}: rel={rel}{hint}; skipping.")
+            continue
 
         out[key] = txt
 
@@ -843,12 +918,24 @@ def run_harris_ingest(file_date_iso: str | None = None) -> Dict[str, Dict[str, L
 
     # Mongo upserts: only upsert if not skipped
     col_b, col_m, col_n = _get_cols(db)
-    if any(f"{g}/bond" not in stale_keys for g in GROUPS):
+    # Only upsert when there is content parsed for a kind
+    if parsed["bond"]:
         _bulk_upsert(col_b, parsed["bond"], file_date)
-    if any(f"{g}/misfel" not in stale_keys for g in GROUPS):
+    if parsed["misfel"]:
         _bulk_upsert(col_m, parsed["misfel"], file_date)
-    if any(f"{g}/nafiling" not in stale_keys for g in GROUPS):
+    if parsed["nafiling"]:
         _bulk_upsert(col_n, parsed["nafiling"], file_date)
+
+    # Weekend hint: if no criminal datasets were parsed and it's weekend, note relying on email roster.
+    try:
+        today_weekday = dt.date.today().weekday()  # Mon=0..Sun=6
+        criminal_counts = sum(1 for d in parsed["bond"] if d.get("group") == "Criminal") \
+                          + sum(1 for d in parsed["misfel"] if d.get("group") == "Criminal") \
+                          + sum(1 for d in parsed["nafiling"] if d.get("group") == "Criminal")
+        if criminal_counts == 0 and today_weekday >= 5:
+            print("[harris] NOTE: No criminal datasets parsed on weekend; rely on email roster updates if present.")
+    except Exception:
+        pass
 
     window = int(_env("HARRIS_NEW_WINDOW_DAYS", "30"))
     alerts = {
