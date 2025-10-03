@@ -301,3 +301,41 @@ Notes:
 - Address field is a passthrough from Harris source; some zip values may have trailing punctuation like ";". Frontend should trim non-digit suffixes from zip for display.
 - time_bucket_v2 is computed from booking_datetime with Central Time interpretation for date-only inputs; values drift with time, so expect yesterday’s 24_48h to become 48_72h, etc.
 - Legacy time_bucket exists but should not be used in new UI; it’s based strictly on booking_date and kept for parity.
+
+3) Buckets breakdown (canonical order)
+
+GET /simple/harris/buckets
+
+Response shape:
+
+- by_bucket_v2: array ordered as [0_24h, 24_48h, 48_72h, 3d_7d, 7d_30d, 30d_60d, 60d_plus, missing]
+- total: total number of `simple_harris` documents (excludes "missing")
+
+This is a lightweight way for FE or ops to confirm that "new today" are in 0_24h and older items have shifted to subsequent buckets.
+
+---
+
+Operational note: Normalizer logging
+
+The normalizer prints progress and writes a per-run log file via the E2E runner. You can tune it via env:
+
+```bash
+# defaults used by E2E
+HARRIS_BATCH_SIZE=2000
+HARRIS_BULK_SIZE=1000
+HARRIS_PROGRESS_EVERY=1000
+HARRIS_LOG_LEVEL=INFO
+# E2E creates logs/normalize_harris_<timestamp>.log if HARRIS_LOG_FILE is not set
+```
+
+Run normalizer standalone with explicit flags:
+
+```bash
+./.venv/bin/python normalize_to_simple.py \
+  --county harris \
+  --batch-size 2000 \
+  --bulk-size 1000 \
+  --progress-every 1000 \
+  --log-level INFO \
+  --log-file logs/normalize_harris_$(date +%Y%m%dT%H%M%S).log
+```
