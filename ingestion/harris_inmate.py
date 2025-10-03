@@ -649,6 +649,10 @@ def _fetch_six_files_latest() -> Dict[str, str]:
                     raise RuntimeError("Downloaded content did not look like expected CSV/text dataset")
             except Exception as e:
                 raise RuntimeError(f"Failed to fetch {key} via direct and WebForms: rel={rel}") from e
+        # If still no content, raise with a helpful hint rather than returning None
+        if txt is None:
+            hint = " (date-only filename; direct download failed)" if is_date_only else ""
+            raise RuntimeError(f"Failed to fetch {key}: rel={rel}{hint}. No valid content retrieved.")
 
         out[key] = txt
 
@@ -757,7 +761,12 @@ def run_harris_ingest(file_date_iso: str | None = None) -> Dict[str, Dict[str, L
         # bond
         key_bond = f"{g}/bond"
         if key_bond not in stale_keys:
-            rows = _parse_rows(six[key_bond])
+            txt = six.get(key_bond)
+            if not txt:
+                print(f"[harris] SKIP {key_bond} (no dataset content retrieved)")
+                rows = []
+            else:
+                rows = _parse_rows(txt)
             # derive per-file date from filename date token when available
             _fd_raw = latest_by_key.get(key_bond)
             _fd_dt = _normalize_date_token(_fd_raw)
@@ -777,7 +786,12 @@ def run_harris_ingest(file_date_iso: str | None = None) -> Dict[str, Dict[str, L
         # misfel
         key_misfel = f"{g}/misfel"
         if key_misfel not in stale_keys:
-            rows = _parse_rows(six[key_misfel])
+            txt = six.get(key_misfel)
+            if not txt:
+                print(f"[harris] SKIP {key_misfel} (no dataset content retrieved)")
+                rows = []
+            else:
+                rows = _parse_rows(txt)
             _fd_raw = latest_by_key.get(key_misfel)
             _fd_dt = _normalize_date_token(_fd_raw)
             _fd_iso = _fd_dt.isoformat() if _fd_dt else file_date
@@ -794,7 +808,12 @@ def run_harris_ingest(file_date_iso: str | None = None) -> Dict[str, Dict[str, L
         # nafiling
         key_nafiling = f"{g}/nafiling"
         if key_nafiling not in stale_keys:
-            rows = _parse_rows(six[key_nafiling])
+            txt = six.get(key_nafiling)
+            if not txt:
+                print(f"[harris] SKIP {key_nafiling} (no dataset content retrieved)")
+                rows = []
+            else:
+                rows = _parse_rows(txt)
             _fd_raw = latest_by_key.get(key_nafiling)
             _fd_dt = _normalize_date_token(_fd_raw)
             _fd_iso = _fd_dt.isoformat() if _fd_dt else file_date

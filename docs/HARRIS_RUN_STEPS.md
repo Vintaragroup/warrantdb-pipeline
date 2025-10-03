@@ -248,3 +248,56 @@ Cron example (runs after E2E):
 15 2 * * * cd /Users/ryanmorrow/Documents/Projects2025/WarrentDB/warrantdb-pipeline && \
   ./.venv/bin/python -m scripts.health_simple_harris >> logs/health_harris.log 2>&1
 ```
+
+## Frontend integration: API contract
+
+The API exposes read endpoints tailored for the frontend to consume the v2 buckets and row data. All fields below come from the `simple_harris` collection and are stable.
+
+1) Summary (v2 buckets + coverage)
+
+GET /simple/harris/summary
+
+Response shape:
+
+- date: ISO string (UTC)
+- by_bucket_v2: array of { _id: one of [0_24h,24_48h,48_72h,3d_7d,7d_30d,30d_60d,60d_plus,missing], count: number }
+- windows: { 24h, 48h, 72h, 7d, 30d } rollups based on v2 buckets
+- coverage: { total, pct_booking_datetime, pct_time_bucket_v2 }
+
+2) Inmates list (supports v2 filter, paging, and sort)
+
+GET /simple/harris/inmates?bucket_v2=7d_30d&limit=50&skip=0&sort=-booking_datetime
+
+Query parameters:
+
+- bucket_v2 (optional): filter by a canonical v2 tag: 0_24h | 24_48h | 48_72h | 3d_7d | 7d_30d | 30d_60d | 60d_plus
+- limit (default 200, max 1000): page size
+- skip (default 0): offset for paging
+- sort (default -booking_datetime): supports +/- prefix. Typical fields: booking_datetime, booking_date_v2.
+
+Response shape:
+
+- count: number of items in this page
+- skip, limit: echo of paging inputs
+- items: array of rows with these fields:
+  - county: "harris"
+  - category: "Civil" | "Criminal" (if present)
+  - case_number: digits prefix format
+  - anchor: stable upsert key, generally case_number or spn fallback
+  - full_name: "LAST, FIRST MIDDLE"
+  - charge: string
+  - status: derived status string
+  - bond_amount: number | null
+  - bond_label: string (e.g., "REFER TO MAGISTRATE", may be empty)
+  - booking_datetime: ISO8601 UTC (e.g., 2025-08-22T05:00:00Z)
+  - booking_date_v2: YYYY-MM-DD (America/Chicago date)
+  - time_bucket_v2: one of v2 canonical tags
+  - address: object | null; shape: { line1, city, state?, zip } — not all keys guaranteed
+  - tags: [] (reserved for future enrichment)
+  - normalized_at: ISO8601 string
+
+Notes:
+
+- Address field is a passthrough from Harris source; some zip values may have trailing punctuation like ";". Frontend should trim non-digit suffixes from zip for display.
+- time_bucket_v2 is computed from booking_datetime with Central Time interpretation for date-only inputs; values drift with time, so expect yesterday’s 24_48h to become 48_72h, etc.
+- Legacy time_bucket exists but should not be used in new UI; it’s based strictly on booking_date and kept for parity.
