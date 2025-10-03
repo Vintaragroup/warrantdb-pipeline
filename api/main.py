@@ -245,3 +245,29 @@ def simple_harris_inmates(
         "limit": limit,
         "items": docs,
     }
+
+
+@app.get("/simple/harris/buckets")
+def simple_harris_buckets():
+    """
+    Bucket breakdown for simple_harris using canonical v2 buckets.
+
+    Returns:
+      - by_bucket_v2: list in canonical order (0_24h → 60d_plus)
+      - total: total simple_harris docs
+    """
+    db = get_db()
+    coll = db["simple_harris"]
+
+    # Aggregate counts by time_bucket_v2
+    res = list(coll.aggregate([
+        {"$group": {"_id": {"$ifNull": ["$time_bucket_v2", "missing"]}, "count": {"$sum": 1}}},
+        {"$sort": {"_id": 1}},
+    ]))
+
+    order = ["0_24h", "24_48h", "48_72h", "3d_7d", "7d_30d", "30d_60d", "60d_plus", "missing"]
+    by = {r["_id"]: int(r["count"]) for r in res}
+    buckets = [{"bucket": b, "count": by.get(b, 0)} for b in order]
+
+    total = sum(x["count"] for x in buckets if x["bucket"] != "missing")
+    return {"by_bucket_v2": buckets, "total": total}

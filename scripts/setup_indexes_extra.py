@@ -11,12 +11,22 @@ Env:
   MONGO_DB   - default: warrantdb
 """
 import os
+from pathlib import Path
 from pymongo import MongoClient, ASCENDING, DESCENDING
+from pymongo.errors import OperationFailure
+try:
+    from dotenv import load_dotenv
+except Exception:
+    load_dotenv = None
 
 COUNTIES = ["harris", "galveston", "brazoria", "fortbend", "jefferson"]
 
 
 def _db():
+    # Load .env from repo root so MONGO_* are available when running as a module
+    if load_dotenv is not None:
+        # scripts/ -> repo root is parent
+        load_dotenv(Path(__file__).resolve().parents[1] / ".env")
     uri = os.environ["MONGO_URI"]
     name = os.environ.get("MONGO_DB", "warrantdb")
     return MongoClient(uri)[name]
@@ -29,13 +39,34 @@ def _ensure_simple_indexes(db, county: str) -> None:
         return
     col = db[name]
     print(f"[setup_indexes_extra] indexing {name}…")
+
+    def safe_create_index(keys, name: str | None = None, **kwargs):
+        try:
+            if name:
+                return col.create_index(keys, name=name, **kwargs)
+            return col.create_index(keys, **kwargs)
+        except OperationFailure as e:
+            # IndexOptionsConflict (code 85) occurs if same spec exists with different name
+            if getattr(e, 'code', None) == 85 or 'Index already exists' in str(e):
+                print(f"  [i] index exists (spec matches) -> {name or keys}")
+                return None
+            raise
     # Name search & common lookups
-    col.create_index([("full_name", ASCENDING)])
-    col.create_index([("booking_number", ASCENDING)])
-    col.create_index([("case_number", ASCENDING)])
+    safe_create_index([("full_name", ASCENDING)], name="full_name")
+    safe_create_index([("booking_number", ASCENDING)], name="booking_number")
+    safe_create_index([("case_number", ASCENDING)], name="case_number")
+    # Upsert filter performance: compound on upsert key parts
+    safe_create_index([
+        ("_upsert_key.county", ASCENDING),
+        ("_upsert_key.category", ASCENDING),
+        ("_upsert_key.anchor", ASCENDING),
+    ], name="upsert_key_parts")
+    # FE/API sorting & filters
+    safe_create_index([("booking_datetime", DESCENDING)], name="booking_datetime_desc")
+    safe_create_index([("time_bucket_v2", ASCENDING)], name="time_bucket_v2")
     # Recency
-    col.create_index([("updated_at", DESCENDING)])
-    col.create_index([("created_at", DESCENDING)])
+    safe_create_index([("updated_at", DESCENDING)], name="updated_at_desc")
+    safe_create_index([("created_at", DESCENDING)], name="created_at_desc")
 
 
 def _ensure_fp_state_indexes(db, county: str) -> None:

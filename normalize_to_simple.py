@@ -16,9 +16,12 @@ import os
 import sys
 import argparse
 from typing import Any, Dict, Iterable, Optional, Tuple
+import logging
+import time
 
 import yaml
 from pymongo import MongoClient
+from pymongo import UpdateOne, WriteConcern
 from dotenv import load_dotenv
 
 # mapping engine (your existing modules)
@@ -451,7 +454,7 @@ def _maybe_compute_time_bucket_v2(doc: Dict[str, Any], debug: bool = False) -> N
 
 # ------------------ Main ------------------
 
-def run_for_county(client: MongoClient, dbname: str, county: str, batch_size: int, max_docs: Optional[int], debug: bool):
+def run_for_county(client: MongoClient, dbname: str, county: str, batch_size: int, max_docs: Optional[int], debug: bool, bulk_size: int = 500, progress_every: int = 1000):
     mapping_file = mapping_path_for_county(county)
     mapping = load_mapping(mapping_file)
 
@@ -466,14 +469,17 @@ def run_for_county(client: MongoClient, dbname: str, county: str, batch_size: in
     simple_coll_name = ensure_simple_collection_name(mapping)
     simple_coll = mongo_db[simple_coll_name]
 
-    if debug:
-        print(f"=== {county.upper()} ===")
-        print(f"Using raw={raw_coll_name} -> simple={simple_coll_name} | mapping={mapping_file}")
+    logging.info(
+        "normalize start | county=%s raw=%s simple=%s mapping=%s batch_size=%s bulk_size=%s progress_every=%s",
+        county, raw_coll_name, simple_coll_name, mapping_file, batch_size, bulk_size, progress_every,
+    )
 
     upserted = 0
     skipped = 0
     total = 0
     modified = 0
+    pending_ops: list[UpdateOne] = []
+    started_at = time.time()
 
     for raw in iter_raw(raw_coll, batch_size=batch_size, max_docs=max_docs):
         total += 1
@@ -501,20 +507,36 @@ def run_for_county(client: MongoClient, dbname: str, county: str, batch_size: in
             # Drop None values to avoid cluttering the simple collection
             simple_doc = {k: v for k, v in normalized.items() if v is not None}
 
-            # Upsert by _upsert_key using $set so only changed fields are written
-            res = simple_coll.update_one(
-                {"_upsert_key": upsert_key},
-                {"$set": simple_doc},
-                upsert=True,
-            )
+            # Upsert by _upsert_key using nested-field filter for better index compatibility
+            # Build a filter like {"_upsert_key.county": ..., "_upsert_key.category": ..., "_upsert_key.anchor": ...}
+            upsert_filter = {f"_upsert_key.{k}": v for k, v in upsert_key.items()}
+            # Queue for bulk upsert (unordered for throughput)
+            pending_ops.append(UpdateOne(upsert_filter, {"$set": simple_doc}, upsert=True))
 
-            # Track results
-            if res.upserted_id is not None:
-                upserted += 1  # newly inserted
-            else:
-                if res.modified_count:
-                    modified += 1
-                    upserted += 1  # count modified as successful upsert for summary
+            # Flush when we reach bulk_size to reduce round-trips
+            if len(pending_ops) >= bulk_size:
+                try:
+                    res = simple_coll.bulk_write(pending_ops, ordered=False)
+                    upserted += (res.upserted_count or 0) + (res.modified_count or 0)
+                    modified += (res.modified_count or 0)
+                finally:
+                    pending_ops.clear()
+                # Log progress on flush
+                elapsed = max(time.time() - started_at, 1e-6)
+                rate = total / elapsed
+                logging.info(
+                    "progress | processed=%s upserted_or_modified=%s skipped=%s rate=%.1f docs/s",
+                    total, upserted, skipped, rate,
+                )
+
+            # Periodic progress log
+            if progress_every and (total % progress_every == 0):
+                elapsed = max(time.time() - started_at, 1e-6)
+                rate = total / elapsed
+                logging.info(
+                    "progress | processed=%s upserted_or_modified=%s skipped=%s rate=%.1f docs/s",
+                    total, upserted, skipped, rate,
+                )
 
         except Exception as e:
             skipped += 1
@@ -525,8 +547,18 @@ def run_for_county(client: MongoClient, dbname: str, county: str, batch_size: in
                 print(f"        raw keys: {keys}")
             continue
 
-    if debug:
-        print(f"Done {county}: total={total} inserted_or_updated={upserted} modified={modified} skipped={skipped}")
+    # Flush any remaining ops
+    if pending_ops:
+        res = simple_coll.bulk_write(pending_ops, ordered=False)
+        upserted += (res.upserted_count or 0) + (res.modified_count or 0)
+        modified += (res.modified_count or 0)
+        pending_ops.clear()
+    elapsed = max(time.time() - started_at, 1e-6)
+    rate = total / elapsed
+    logging.info(
+        "normalize done | county=%s total=%s upserted_or_modified=%s modified=%s skipped=%s rate=%.1f docs/s",
+        county, total, upserted, modified, skipped, rate,
+    )
 
 
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
@@ -536,6 +568,10 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     g.add_argument("--all", action="store_true", help="Run for all counties (folders under mappings/)")
 
     p.add_argument("--batch-size", type=int, default=1000)
+    p.add_argument("--bulk-size", type=int, default=500, help="Number of docs per unordered bulk write")
+    p.add_argument("--progress-every", type=int, default=1000, help="Emit a progress log every N processed docs")
+    p.add_argument("--log-file", type=str, default=None, help="Optional path to write a log file in addition to stdout")
+    p.add_argument("--log-level", type=str, default="INFO", choices=["DEBUG","INFO","WARN","ERROR"], help="Log level")
     p.add_argument("--max-docs", type=int, default=None)
     p.add_argument("--debug", action="store_true")
     return p.parse_args(argv)
@@ -550,10 +586,36 @@ def main():
         print("ERROR: MONGO_URI and MONGO_DB env vars are required.", file=sys.stderr)
         sys.exit(2)
 
-    client = MongoClient(mongo_uri)
+    # Configure logging
+    level = getattr(logging, (getattr(args, "log_level", None) or "INFO").upper(), logging.INFO)
+    logging.basicConfig(level=level, format="%(asctime)s %(levelname)s %(message)s")
+    if getattr(args, "log_file", None):
+        fh = logging.FileHandler(args.log_file)
+        fh.setLevel(level)
+        fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        logging.getLogger().addHandler(fh)
+
+    # Add conservative timeouts to avoid indefinite stalls during network issues
+    client = MongoClient(
+        mongo_uri,
+        serverSelectionTimeoutMS=10000,
+        connectTimeoutMS=10000,
+        socketTimeoutMS=30000,
+        retryWrites=True,
+        maxPoolSize=20,
+    )
 
     if args.county:
-        run_for_county(client, mongo_db, args.county.strip().lower(), args.batch_size, args.max_docs, args.debug)
+        run_for_county(
+            client,
+            mongo_db,
+            args.county.strip().lower(),
+            args.batch_size,
+            args.max_docs,
+            args.debug,
+            bulk_size=args.bulk_size,
+            progress_every=getattr(args, "progress_every", 1000),
+        )
     else:
         # --all: run for each subfolder under mappings/
         mappings_dir = "mappings"
@@ -565,7 +627,16 @@ def main():
             if not os.path.isdir(path):
                 continue
             try:
-                run_for_county(client, mongo_db, county, args.batch_size, args.max_docs, args.debug)
+                run_for_county(
+                    client,
+                    mongo_db,
+                    county,
+                    args.batch_size,
+                    args.max_docs,
+                    args.debug,
+                    bulk_size=args.bulk_size,
+                    progress_every=getattr(args, "progress_every", 1000),
+                )
             except Exception as e:
                 print(f"[WARN] county '{county}' failed: {e}", file=sys.stderr)
                 continue

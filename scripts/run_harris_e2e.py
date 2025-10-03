@@ -91,7 +91,28 @@ def step_ingest() -> int:
 def step_normalize() -> int:
     _log("STEP: normalize (simple_harris)")
     # normalize_to_simple.py lives at repo root, so call the file directly
-    return _run([sys.executable, "normalize_to_simple.py", "--county", "harris"])
+    args = [sys.executable, "normalize_to_simple.py", "--county", "harris"]
+    # Optional tuning via env (with defaults)
+    bs = os.getenv("HARRIS_BATCH_SIZE", "2000")
+    bks = os.getenv("HARRIS_BULK_SIZE", "1000")
+    pe = os.getenv("HARRIS_PROGRESS_EVERY", "1000")
+    ll = os.getenv("HARRIS_LOG_LEVEL", "INFO")
+    lf = os.getenv("HARRIS_LOG_FILE")
+    # Ensure logs dir exists if writing file
+    if not lf:
+        from datetime import datetime
+        logs = Path.cwd() / "logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+        lf = str(logs / f"normalize_harris_{stamp}.log")
+    args += [
+        "--batch-size", bs,
+        "--bulk-size", bks,
+        "--progress-every", pe,
+        "--log-level", ll,
+        "--log-file", lf,
+    ]
+    return _run(args)
 
 
 def step_rebucket() -> int:
