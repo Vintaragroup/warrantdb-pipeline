@@ -293,14 +293,20 @@ Response shape:
   - booking_date_v2: YYYY-MM-DD (America/Chicago date)
   - time_bucket_v2: one of v2 canonical tags
   - address: object | null; shape: { line1, city, state?, zip } — not all keys guaranteed
+  - phone_nbr1: string | null (from email rosters if available)
+  - phone_nbr2: string | null
+  - phone_nbr3: string | null
+  - phones_source: string | null (e.g., "harris_email_roster")
+  - phones_updated_at: ISO8601 string | null
   - tags: [] (reserved for future enrichment)
   - normalized_at: ISO8601 string
 
-Notes:
+ Notes:
 
 - Address field is a passthrough from Harris source; some zip values may have trailing punctuation like ";". Frontend should trim non-digit suffixes from zip for display.
 - time_bucket_v2 is computed from booking_datetime with Central Time interpretation for date-only inputs; values drift with time, so expect yesterday’s 24_48h to become 48_72h, etc.
 - Legacy time_bucket exists but should not be used in new UI; it’s based strictly on booking_date and kept for parity.
+ - Phone fields are opportunistic and may be missing; render defensively. Apply display masking as desired on the client.
 
 3) Buckets breakdown (canonical order)
 

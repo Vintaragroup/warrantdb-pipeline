@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Request
 from typing import Optional, List, Dict, Any
 from storage.mongo_client import get_db
 from pydantic import BaseModel
@@ -7,7 +7,7 @@ from fastapi import BackgroundTasks
 from pathlib import Path
 from dotenv import load_dotenv
 from bson import ObjectId
-import traceback, os
+import traceback, os, logging
 # make sure .env is loaded even when uvicorn runs from elsewhere
 load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env")
 
@@ -15,6 +15,20 @@ load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env")
 from ingestion.harris_inmate import run_harris_ingest
 
 app = FastAPI(title="WarrantDB API", version="0.1.0")
+
+# Minimal request logging to trace FE calls (method, path, querystring)
+logger = logging.getLogger("api")
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    try:
+        qs = request.url.query
+        logger.info("%s %s?%s", request.method, request.url.path, qs)
+    except Exception:
+        pass
+    response = await call_next(request)
+    return response
 
 class PersonQuery(BaseModel):
     name: Optional[str] = None
@@ -181,6 +195,8 @@ def simple_harris_summary():
 @app.get("/simple/harris/inmates")
 def simple_harris_inmates(
     bucket_v2: Optional[str] = Query(default=None, description="Filter by time_bucket_v2 (e.g., 0_24h, 7d_30d)"),
+    bucket: Optional[str] = Query(default=None, description="FE-friendly alias (e.g., 24h, 48h, 72h) -> mapped to bucket_v2"),
+    window: Optional[str] = Query(default=None, description="Rollup window (24h, 48h, 72h, 7d, 30d, 60d)"),
     limit: int = Query(default=200, ge=1, le=1000),
     skip: int = Query(default=0, ge=0),
     sort: Optional[str] = Query(default="-booking_datetime", description="Sort field; prefix '-' for desc"),
@@ -193,8 +209,29 @@ def simple_harris_inmates(
     coll = db["simple_harris"]
 
     q: Dict[str, Any] = {"county": "harris"}
+
+    # FE-friendly aliases
+    alias_bucket = {
+        "24h": "0_24h",
+        "48h": "24_48h",
+        "72h": "48_72h",
+    }
+    window_map = {
+        "24h": ["0_24h"],
+        "48h": ["24_48h"],
+        "72h": ["48_72h"],
+        "7d": ["0_24h", "24_48h", "48_72h", "3d_7d"],
+        "30d": ["0_24h", "24_48h", "48_72h", "3d_7d", "7d_30d"],
+        "60d": ["0_24h", "24_48h", "48_72h", "3d_7d", "7d_30d", "30d_60d"],
+    }
+
+    # Priority: explicit bucket_v2 > window > bucket alias
     if bucket_v2:
         q["time_bucket_v2"] = bucket_v2
+    elif window and window.lower() in window_map:
+        q["time_bucket_v2"] = {"$in": window_map[window.lower()]}
+    elif bucket and bucket.lower() in alias_bucket:
+        q["time_bucket_v2"] = alias_bucket[bucket.lower()]
 
     # Determine sort
     sort_field = "booking_datetime"
@@ -217,8 +254,11 @@ def simple_harris_inmates(
         "category": 1,
         "case_number": 1,
         "anchor": 1,
+        # expose SPN for FE linkage/debugging
+        "spn": 1,
         # display
         "full_name": 1,
+        "dob": 1,
         "charge": 1,
         "status": 1,
         # bond
@@ -230,6 +270,14 @@ def simple_harris_inmates(
         "time_bucket_v2": 1,
         # address passthrough
         "address": 1,
+        # phones from roster enrichment (if set)
+        "phone_nbr1": 1,
+        "phone_nbr2": 1,
+        "phone_nbr3": 1,
+        # spn anomaly context (if present)
+        "spn_flagged": 1,
+        "spn_bad": 1,
+        "spn_flag_reason": 1,
         # optional helpful fields
         "tags": 1,
         "normalized_at": 1,

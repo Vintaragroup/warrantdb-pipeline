@@ -51,6 +51,14 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
 
+# Optional: Dropbox SDK for mirroring saved attachments to a Dropbox folder
+try:
+    import dropbox  # type: ignore
+    from dropbox.files import WriteMode  # type: ignore
+except Exception:
+    dropbox = None  # gracefully degrade if not installed
+    WriteMode = None  # type: ignore
+
 # Load .env early so IMAP_* and other vars are available
 load_dotenv()
 DEBUG = os.getenv("FETCH_DEBUG", "0").strip() not in ("0", "false", "False", "")
@@ -279,6 +287,52 @@ def _save_attachment(base_dir: Path, filename: str, content: bytes) -> Path:
     return path
 
 
+_DBX_CLIENT = None  # lazy-initialized Dropbox client
+
+
+def _get_dbx_client():
+    """Return a Dropbox client if DROPBOX_ACCESS_TOKEN is set and SDK is available, else None."""
+    global _DBX_CLIENT
+    token = os.getenv("DROPBOX_ACCESS_TOKEN", "").strip()
+    if not token or dropbox is None:
+        return None
+    if _DBX_CLIENT is None:
+        try:
+            _DBX_CLIENT = dropbox.Dropbox(token, timeout=30)
+        except Exception:
+            _DBX_CLIENT = None
+    return _DBX_CLIENT
+
+
+def _maybe_upload_dropbox(local_path: Path, content: bytes) -> Optional[str]:
+    """If configured, upload the attachment bytes to Dropbox and return the remote path."""
+    dbx = _get_dbx_client()
+    if dbx is None:
+        return None
+    base_folder = os.getenv("DROPBOX_BASE_FOLDER", "/warrantdb/email_rosters").strip() or "/warrantdb/email_rosters"
+    # Ensure path starts with '/'
+    if not base_folder.startswith("/"):
+        base_folder = "/" + base_folder
+
+    # Mirror the relative path under HARRIS_EMAIL_ROSTER_DIR if it contains a date folder
+    # Otherwise, upload flat under base_folder
+    try:
+        rel_name = local_path.name
+        parent = local_path.parent.name  # may be a YYYY-MM-DD if ROSTER_SAVE_BY_DATE=1
+        # If parent looks like a date, keep it as a subfolder in Dropbox
+        drop_dir = base_folder
+        if re.match(r"^\d{4}-\d{2}-\d{2}$", parent):
+            drop_dir = f"{base_folder}/{parent}"
+        drop_path = f"{drop_dir}/{rel_name}"
+        # Create folder(s) implicitly by upload; Dropbox API allows this
+        dbx.files_upload(content, drop_path, mode=WriteMode.overwrite)
+        return drop_path
+    except Exception as e:
+        if DEBUG:
+            print(f"[fetch_email_rosters] DEBUG dropbox upload failed: {e}")
+        return None
+
+
 def main() -> Dict[str, Any]:
     base_dir = _expand_dir(os.getenv("HARRIS_EMAIL_ROSTER_DIR", "email_rosters"))
     mark_seen = os.getenv("MARK_SEEN", "1") not in ("0", "false", "False")
@@ -336,6 +390,8 @@ def main() -> Dict[str, Any]:
                 saved += 1
                 if DEBUG:
                     saved_paths_debug.append(str(save_path))
+                # Optional: mirror to Dropbox for archival
+                dropbox_path = _maybe_upload_dropbox(save_path, content)
                 doc = {
                     "message_id": msg_id,
                     "from": _decode_maybe(msg.get("From", "")),
@@ -343,6 +399,7 @@ def main() -> Dict[str, Any]:
                     "date": _decode_maybe(msg.get("Date", "")),
                     "filename": fname,
                     "saved_path": str(save_path),
+                    "dropbox_path": dropbox_path,
                     "sha256": sha,
                     "size": len(content),
                     "saved_at": _now_iso(),

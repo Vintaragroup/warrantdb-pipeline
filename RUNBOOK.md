@@ -252,6 +252,11 @@ What it does:
 - Deduplicates by SHA-256 so the same attachment isn’t saved twice.
 - Records a ledger in collection `email_roster_inbox`.
 
+Optional Dropbox mirroring:
+- If you set `DROPBOX_ACCESS_TOKEN` (and optionally `DROPBOX_BASE_FOLDER`), each saved attachment is also uploaded to Dropbox.
+- Default Dropbox target is `/warrantdb/email_rosters` with a `/YYYY-MM-DD` subfolder when `ROSTER_SAVE_BY_DATE=1`.
+- This provides durable archival even when running on ephemeral environments like Render jobs.
+
 Then run the importer to load/enrich into Mongo:
 ```bash
 python3 -m scripts.run_ingestion --source harris_email_roster

@@ -77,9 +77,14 @@ def load_prev_state(state_coll) -> Dict[str, str]:
 
 
 def persist_state(state_coll, cur_map: Dict[str, str]) -> None:
-    # Upsert each key/fp pair. (Small cost; avoids extra deps for bulk helpers.)
-    for k, f in cur_map.items():
-        state_coll.update_one({"key": k}, {"$set": {"key": k, "fp": f}}, upsert=True)
+    """Bulk upsert all key/fp pairs for performance."""
+    if not cur_map:
+        return
+    from pymongo import UpdateOne
+    ops = [UpdateOne({"key": k}, {"$set": {"key": k, "fp": f}}, upsert=True) 
+           for k, f in cur_map.items()]
+    if ops:
+        state_coll.bulk_write(ops)
 
 
 def generate_for_county(db, county: str) -> Tuple[int, int, List[Dict]]:

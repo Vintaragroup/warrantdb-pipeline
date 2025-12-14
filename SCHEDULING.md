@@ -115,4 +115,25 @@ PIPELINE_STEPS=ingest python -m scripts.run_pipeline
 
 # Run only specified sources:
 PIPELINE_SOURCES="jefferson_jail,galveston_p2c_fast" python -m scripts.run_pipeline
+
+---
+
+## Optional: Nightly DOB enrichment (Harris, last 24h)
+
+Run this once per night after normalization to enrich recent Harris entries with DOB from HCSO. The script only targets rows missing DOB by default.
+
+```bash
+# Cron example (runs at 2:15 AM local time; adjust as needed)
+15 2 * * * cd /opt/warrantdb-pipeline && /usr/bin/env -S bash -lc 'source .venv/bin/activate && python -m scripts.enrich_harris_dob --limit 200 --window 24h >> logs/enrich_harris_dob.$(date +\%F).log 2>&1'
+```
+
+For Render, create a Cron Job that runs your Worker command:
+
+```
+render run python -m scripts.enrich_harris_dob --limit 200 --window 24h
+```
+
+Environment variables required:
+- HCSO_SPN_URL_FMT, HCSO_NAME_URL_FMT
+- Optional: HCSO_THROTTLE_SEC, HCSO_TIMEOUT_SEC, HCSO_BETWEEN_PEOPLE_SEC
 ```

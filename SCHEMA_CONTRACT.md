@@ -82,6 +82,8 @@ Planned Consolidation (future phase):
 | `normalized_at` | ISO datetime | Normalization run timestamp |
 | `tags` | array[string] | Includes anomaly tags (`future_date_candidate`, etc.) |
 | `history` (raw collections) | array | Not replicated in simple yet for Harris bond (future enrichment plan) |
+| `phones_source` | string | Provenance for phone fields (e.g., `harris_email_roster`) |
+| `phones_updated_at` | ISO datetime | When phone fields were last written |
 
 ---
 ## 8. Field Stability & Guarantees
@@ -104,6 +106,32 @@ Current Mapping:
 | `bond` | Transitional |
 | `bond_amount` | Stable |
 | `bond_label` | Stable (enum expansion allowed) |
+| `phone_nbr1` | Stable (optional presence) |
+| `phone_nbr2` | Stable (optional presence) |
+| `phone_nbr3` | Stable (optional presence) |
+| `phones_source` | Stable |
+| `phones_updated_at` | Stable |
+
+---
+## 8a. Contact Phone Fields (Emergency Contacts)
+| Field | Type | Example | Notes |
+|-------|------|---------|-------|
+| `phone_nbr1` | string | `2815551234` or formatted | Primary phone from roster (no enforced format) |
+| `phone_nbr2` | string | `713-555-9876` | Secondary phone |
+| `phone_nbr3` | string | `832 555 0000` | Tertiary phone |
+| `phones_source` | string | `harris_email_roster` | Source of the most recent phone write |
+| `phones_updated_at` | ISO datetime | `2025-10-09T21:20:07.102274+00:00` | Update timestamp (UTC) |
+
+Population rules:
+- Phones are populated opportunistically from Harris email rosters when present. Matching is by `spn` (preferred), then `case_number`, then `full_name + dob` if available.
+- Writes are idempotent: repeated roster runs update the same fields and refresh `phones_updated_at`.
+- Formatting is not enforced server-side; frontend should display raw or apply a phone mask as needed.
+
+Frontend usage:
+```js
+// From GET /simple/harris/inmates
+const { phone_nbr1, phone_nbr2, phone_nbr3, phones_source, phones_updated_at } = row;
+```
 
 ---
 ## 9. Derivation Algorithm (Pseudo)

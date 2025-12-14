@@ -56,6 +56,10 @@ HEADER_MAP = {
     "status": ["status", "custody_status"],
     "booking_date": ["booking_date", "booked", "booked_date", "date booked"],
     "bond_amount": ["bond", "bond_amount", "bond amt"],
+    # Emergency contact phone numbers
+    "phone_nbr1": ["phone nbr1", "phone nbr 1", "phone1", "phone #1", "phone number 1"],
+    "phone_nbr2": ["phone nbr2", "phone nbr 2", "phone2", "phone #2", "phone number 2"],
+    "phone_nbr3": ["phone nbr3", "phone nbr 3", "phone3", "phone #3", "phone number 3"],
 }
 
 
@@ -313,6 +317,78 @@ class HarrisEmailRosterImporter:
                 pass
         return mod_total
 
+    def _upsert_simple_harris_phones(self, row: Dict[str, Any]) -> int:
+        """Upsert emergency contact phone numbers into simple_harris.
+        Matches by SPN primarily; falls back to name+dob if present.
+        Returns modified count.
+        """
+        def _get_phone_variants(row: Dict[str, Any], idx: int) -> str:
+            # try normalized first
+            norm_key = f"phone_nbr{idx}"
+            val = row.get(norm_key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+            # common variants observed in roster sheets (spaces, symbols, NBSP)
+            candidates = [
+                f"phone nbr{idx}",
+                f"phone nbr {idx}",
+                f"phone#{idx}",
+                f"phone # {idx}",
+                f"phone #"+str(idx),
+                f"phone number {idx}",
+                f"phone{idx}",
+            ]
+            for k in candidates:
+                v = row.get(k)
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+            # last resort: search keys loosely
+            try:
+                for k, v in row.items():
+                    if not isinstance(k, str) or not isinstance(v, str):
+                        continue
+                    ks = k.lower().replace("\u00a0", " ").strip()
+                    if ks.startswith("phone") and any(t in ks for t in ("nbr", "number", "#")) and ks.endswith(str(idx)):
+                        if v.strip():
+                            return v.strip()
+            except Exception:
+                pass
+            return ""
+
+        ph1 = _get_phone_variants(row, 1)
+        ph2 = _get_phone_variants(row, 2)
+        ph3 = _get_phone_variants(row, 3)
+        # If no phones provided, nothing to do
+        if not any([ph1, ph2, ph3]):
+            return 0
+
+        spn = (row.get("spn") or "").strip()
+        case = (row.get("case_number") or "").strip()
+        name = _coalesce_name(row)
+        dob = (row.get("dob") or "").strip()
+
+        filt_or = []
+        if spn:
+            filt_or.append({"spn": spn})
+        # As a secondary, allow match by case_number if present (less strict)
+        if case:
+            filt_or.append({"case_number": case})
+        if name and dob:
+            filt_or.append({"full_name": name, "dob": dob})
+        if not filt_or:
+            return 0
+
+        set_fields = {"phones_updated_at": _now_iso(), "phones_source": "harris_email_roster"}
+        if ph1:
+            set_fields["phone_nbr1"] = ph1
+        if ph2:
+            set_fields["phone_nbr2"] = ph2
+        if ph3:
+            set_fields["phone_nbr3"] = ph3
+
+        res = self.db["simple_harris"].update_many({"$or": filt_or}, {"$set": set_fields})
+        return int(res.modified_count or 0)
+
     def run(self) -> Dict[str, Any]:
         self._ensure_indexes()
         files = self._list_files()
@@ -387,6 +463,14 @@ class HarrisEmailRosterImporter:
                 inc = self._enrich_existing(r, sha)
                 updated_existing += inc
                 file_updated += inc
+
+                # update simple_harris phones if present
+                try:
+                    ph_mod = self._upsert_simple_harris_phones(r)
+                    file_updated += ph_mod
+                except Exception as e:
+                    if _debug_enabled():
+                        print(f"[roster.debug] simple_harris phone update error: {e}")
 
             # Mark file as processed in ledger (after successful parse/process)
             try:

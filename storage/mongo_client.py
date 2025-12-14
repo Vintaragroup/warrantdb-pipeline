@@ -1,8 +1,11 @@
 from pymongo import MongoClient
 from dotenv import load_dotenv
+from pathlib import Path
 import os
 
-load_dotenv()
+# Load .env from repo root reliably, regardless of CWD
+_ROOT_DOTENV = Path(__file__).resolve().parents[1] / ".env"
+load_dotenv(dotenv_path=_ROOT_DOTENV)
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 MONGO_DB = os.getenv("MONGO_DB", "warrantdb")
 

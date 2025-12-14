@@ -55,3 +55,21 @@ Start here to run just the Harris roster support flow:
 3) Import rosters: `python3 -m scripts.run_ingestion --source harris_email_roster`
 
 Detailed guidance, cron examples, and verification steps are in `RUNBOOK.md` (sections 9 and 10).
+
+## Harris DOB enrichment (HCSO)
+
+Add Date of Birth to `simple_harris` by querying HCSO using SPN or name:
+
+1) Configure environment (URLs are intentionally env-driven and may change over time):
+	- `HCSO_SPN_URL_FMT`  e.g. `https://example.harriscounty.gov/inmate?spn={spn}`
+	- `HCSO_NAME_URL_FMT` e.g. `https://example.harriscounty.gov/inmate?last={last}&first={first}`
+	- Optional: `HCSO_THROTTLE_SEC`, `HCSO_TIMEOUT_SEC`, `HCSO_BETWEEN_PEOPLE_SEC`
+
+2) Create indexes (optional but recommended):
+	- `python -m scripts.setup_indexes_extra` (adds `simple_harris.simplified` indexes incl. `spn`, `time_bucket_v2`)
+
+3) Run enrichment:
+	- `python -m scripts.enrich_harris_dob --limit 250 --window 30d`
+	- Accepts `--all` (include rows with existing dob), `--prefix ADAMS` (last-name prefix), `--dry-run`.
+
+Provenance is stored in each updated document: `dob_source='hcso'`, `dob_source_url`, `dob_confidence`, and `dob_checked_at`.

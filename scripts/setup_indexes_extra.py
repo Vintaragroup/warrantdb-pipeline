@@ -64,6 +64,8 @@ def _ensure_simple_indexes(db, county: str) -> None:
     # FE/API sorting & filters
     safe_create_index([("booking_datetime", DESCENDING)], name="booking_datetime_desc")
     safe_create_index([("time_bucket_v2", ASCENDING)], name="time_bucket_v2")
+    # SPN lookup convenience (some flows use a top-level spn field in simple docs)
+    safe_create_index([("spn", ASCENDING)], name="spn")
     # Recency
     safe_create_index([("updated_at", DESCENDING)], name="updated_at_desc")
     safe_create_index([("created_at", DESCENDING)], name="created_at_desc")
