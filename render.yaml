@@ -3,10 +3,10 @@ services:
   # Web API (FastAPI/Uvicorn) — optional if you only need background jobs
   - type: web
     name: warrant-api
-    env: python
+    runtime: python
     plan: starter
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn api.app:app --host 0.0.0.0 --port $PORT
+    startCommand: uvicorn api.main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: MONGO_URI
         sync: false
@@ -16,7 +16,7 @@ services:
   # Background worker used by scheduled jobs
   - type: worker
     name: warrant-pipeline
-    env: python
+    runtime: python
     plan: starter
     buildCommand: pip install -r requirements.txt
     startCommand: sleep infinity
